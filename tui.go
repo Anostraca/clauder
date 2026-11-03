@@ -114,6 +114,9 @@ func initStyles(r *lipgloss.Renderer) {
 	favEntryS = r.NewStyle().Foreground(lipgloss.Color("136"))
 }
 
+// safePath is a ~-path made safe to print.
+func safePath(p string) string { return sanitize(tildePath(p), false) }
+
 func fg(c int) lipgloss.Style {
 	if c == 0 {
 		return lipgloss.NewStyle()
@@ -266,7 +269,7 @@ func (m *model) open(it item, run bool) tea.Cmd {
 		return nil
 	}
 	if it.missing {
-		m.msg = errS.Render("not found: " + tildePath(it.path))
+		m.msg = errS.Render("not found: " + safePath(it.path))
 		return nil
 	}
 	if run || !it.kids {
@@ -293,27 +296,27 @@ func (m *model) toggleFav(p string) {
 	on, err := m.cfg.ToggleFavorite(p)
 	switch {
 	case err != nil:
-		m.msg = errS.Render("save failed: " + err.Error())
+		m.msg = errS.Render("save failed: " + sanitize(err.Error(), false))
 	case on:
-		m.msg = starS.Render("★") + " added " + m.cfg.label(p)
+		m.msg = starS.Render("★") + " added " + sanitize(m.cfg.label(p), false)
 	default:
-		m.msg = dimS.Render("removed " + m.cfg.label(p) + " from favorites")
+		m.msg = dimS.Render("removed " + sanitize(m.cfg.label(p), false) + " from favorites")
 	}
 }
 
 func (m *model) addRootFrom(it item) {
 	switch {
 	case it.missing:
-		m.msg = errS.Render("not found: " + tildePath(it.path))
+		m.msg = errS.Render("not found: " + safePath(it.path))
 	case m.cfg.rootIndex(it.path) >= 0:
-		m.msg = dimS.Render(tildePath(it.path) + " is already a root")
+		m.msg = dimS.Render(safePath(it.path) + " is already a root")
 	default:
 		name := m.cfg.uniqueName(defaultRootName(it.path))
 		if err := m.cfg.AddRoot(name, it.path); err != nil {
-			m.msg = errS.Render("save failed: " + err.Error())
+			m.msg = errS.Render("save failed: " + sanitize(err.Error(), false))
 			return
 		}
-		m.msg = okS.Render("added root " + name)
+		m.msg = okS.Render("added root " + sanitize(name, false))
 		if m.cur == "" {
 			m.load(it.path)
 		}
@@ -727,7 +730,7 @@ func (m *model) header() string {
 	if m.cur == "" {
 		return dimS.Render("clauder")
 	}
-	return fg(m.nav.color).Render(m.nav.label) + strings.TrimPrefix(m.cur, m.nav.base)
+	return fg(m.nav.color).Render(sanitize(m.nav.label, false)) + sanitize(strings.TrimPrefix(m.cur, m.nav.base), false)
 }
 
 func (m *model) footer(b *strings.Builder) {
@@ -825,7 +828,7 @@ func (m *model) viewBrowse(b *strings.Builder) {
 				label = label.Bold(true)
 			}
 		}
-		s := label.Render(it.label)
+		s := label.Render(sanitize(it.label, false))
 		if it.missing {
 			s += " " + dimS.Render("(missing)")
 		}
@@ -855,7 +858,7 @@ func (m *model) viewBrowse(b *strings.Builder) {
 func (m *model) viewSearch(b *strings.Builder) {
 	scope := "all roots"
 	if m.cur != "" {
-		scope = m.cfg.label(m.cur)
+		scope = sanitize(m.cfg.label(m.cur), false)
 	}
 	b.WriteString("  " + m.input.View() + "  " + dimS.Render("in "+scope) + "\n")
 	status := fmt.Sprintf("%d of %d folders", len(m.results), len(m.entries))
@@ -898,7 +901,7 @@ func highlight(r Result, selected bool) string {
 		if matched[i] {
 			st = st.Underline(true).Bold(true)
 		}
-		b.WriteString(st.Render(string(ch)))
+		b.WriteString(st.Render(sanitize(string(ch), false)))
 	}
 	return b.String()
 }
@@ -907,7 +910,7 @@ func (m *model) viewNew(b *strings.Builder) {
 	b.WriteString("  " + m.header() + "\n")
 	b.WriteString("  " + dimS.Render("new folder:") + " " + m.input.View() + "\n")
 	if m.newErr != "" {
-		b.WriteString("  " + errS.Render(m.newErr) + "\n")
+		b.WriteString("  " + errS.Render(sanitize(m.newErr, false)) + "\n")
 	}
 	m.footer(b)
 }

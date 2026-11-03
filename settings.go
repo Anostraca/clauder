@@ -123,7 +123,7 @@ func (m *model) settingsInputKey(k tea.KeyMsg) tea.Cmd {
 			name := m.cfg.Roots[s.sel].Name
 			m.cfg.Roots = slices.Delete(m.cfg.Roots, s.sel, s.sel+1)
 			s.sel = min(s.sel, max(len(m.cfg.Roots)-1, 0))
-			m.saveSettings(dimS.Render("deleted root " + name))
+			m.saveSettings(dimS.Render("deleted root " + sanitize(name, false)))
 		}
 		s.sub = setList
 		return nil
@@ -182,7 +182,7 @@ func (m *model) settingsSubmit() {
 			return
 		}
 		s.sel, s.sub = len(m.cfg.Roots)-1, setList
-		m.msg = okS.Render("added root " + v)
+		m.msg = okS.Render("added root " + sanitize(v, false))
 	case setRename:
 		if err := validRootName(m.cfg, v, s.sel); err != nil {
 			s.err = err.Error()
@@ -242,7 +242,7 @@ func commonPrefix(ss []string) string {
 
 func (m *model) viewSettings(b *strings.Builder) {
 	s := &m.set
-	b.WriteString("  " + boldS.Render("settings") + "  " + dimS.Render(tildePath(m.cfg.file)) + "\n")
+	b.WriteString("  " + boldS.Render("settings") + "  " + dimS.Render(safePath(m.cfg.file)) + "\n")
 	width := 0
 	for _, r := range m.cfg.Roots {
 		width = max(width, len(r.Name))
@@ -250,10 +250,10 @@ func (m *model) viewSettings(b *strings.Builder) {
 	m.list(b, len(m.cfg.Roots), s.sel, &s.top, m.settingsExtra(), func(i, _ int, selected bool) string {
 		r := m.cfg.Roots[i]
 		c := fg(m.cfg.RootColor(i))
-		name := fmt.Sprintf("%-*s", width, r.Name)
-		line := c.Render("██") + " " + name + "  " + dimS.Render(tildePath(r.Path))
+		name := fmt.Sprintf("%-*s", width, sanitize(r.Name, false))
+		line := c.Render("██") + " " + name + "  " + dimS.Render(safePath(r.Path))
 		if selected {
-			line = c.Render("██") + " " + boldS.Render(name) + "  " + dimS.Render(tildePath(r.Path))
+			line = c.Render("██") + " " + boldS.Render(name) + "  " + dimS.Render(safePath(r.Path))
 		}
 		if !isDir(r.Path) {
 			line += " " + dimS.Render("(missing)")
@@ -271,13 +271,13 @@ func (m *model) viewSettings(b *strings.Builder) {
 		title := map[setSub]string{setAddPath: "add root", setAddName: "add root", setRename: "rename"}[s.sub]
 		b.WriteString("\n  " + dimS.Render(title+" —") + " " + m.input.View() + "\n")
 		if len(s.cands) > 0 {
-			b.WriteString("  " + dimS.Render(truncList(s.cands, 8)) + "\n")
+			b.WriteString("  " + dimS.Render(sanitize(truncList(s.cands, 8), false)) + "\n")
 		}
 	case setDelete:
-		b.WriteString("\n  " + warnS.Render(fmt.Sprintf("delete root %s? y/n", m.cfg.Roots[s.sel].Name)) + "\n")
+		b.WriteString("\n  " + warnS.Render(fmt.Sprintf("delete root %s? y/n", sanitize(m.cfg.Roots[s.sel].Name, false))) + "\n")
 	}
 	if s.err != "" {
-		b.WriteString("  " + errS.Render(s.err) + "\n")
+		b.WriteString("  " + errS.Render(sanitize(s.err, false)) + "\n")
 	}
 	m.footer(b)
 }

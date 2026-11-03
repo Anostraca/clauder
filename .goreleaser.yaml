@@ -45,10 +45,14 @@ homebrew_casks:
     caveats: |
       clauder starts Claude Code: install it so that `claude` is on your PATH.
       See https://docs.claude.com/en/docs/claude-code
+    # Pushed over SSH with a deploy key that can write to the tap repo only.
     repository:
       owner: Anostraca
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+      branch: main
+      git:
+        url: git@github.com:Anostraca/homebrew-tap.git
+        private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}"
     hooks:
       post:
         # The binary is not notarized: drop the quarantine flag so macOS runs it.

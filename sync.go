@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -20,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Repo is one git repository to sync.
@@ -29,6 +32,7 @@ type Repo struct {
 	URL  string // clone URL from a .meta file, may be empty
 	Meta bool   // repo holds .meta files: pulled before the others
 	Bad  string // invalid .meta entry, reported as a failed row
+	Base string // the .meta directory a listed project must stay inside
 }
 
 const metaDepth = 4
@@ -51,6 +55,7 @@ func discover(target string, ignore, exclude []string) ([]Repo, error) {
 	add := func(r Repo) {
 		if old, ok := projects[r.Dir]; ok {
 			r.URL = cmp.Or(r.URL, old.URL)
+			r.Base = cmp.Or(r.Base, old.Base)
 			r.Meta = r.Meta || old.Meta
 		}
 		projects[r.Dir] = r
@@ -76,14 +81,16 @@ func discover(target string, ignore, exclude []string) ([]Repo, error) {
 			add(Repo{Dir: file, Rel: relTo(file), Bad: "cannot read .meta: " + err.Error()})
 			return
 		}
+		bad := func(key, reason string) {
+			add(Repo{Dir: file + "\x00" + key, Rel: relTo(file) + ": " + key, Bad: reason})
+		}
 		for key, u := range m.Projects {
 			p, err := metaProjectPath(dir, key)
 			if err != nil {
-				id := file + "\x00" + key
-				add(Repo{Dir: id, Rel: relTo(file) + ": " + key, Bad: fmt.Sprintf("invalid project path %q: %v", key, err)})
+				bad(key, err.Error())
 				continue
 			}
-			add(Repo{Dir: p, URL: u})
+			add(Repo{Dir: p, URL: u, Base: dir})
 			claimed[p] = true
 		}
 	}
@@ -121,6 +128,8 @@ func discover(target string, ignore, exclude []string) ([]Repo, error) {
 		projects[target] = r
 	}
 
+	refuseNested(projects, relTo)
+
 	var repos []Repo
 	for _, r := range projects {
 		if r.Rel == "" {
@@ -135,32 +144,173 @@ func discover(target string, ignore, exclude []string) ([]Repo, error) {
 	return repos, nil
 }
 
+// refuseNested turns a listed project into a failed row when another repo
+// or project (from any .meta file, or a plain repo) sits between its .meta
+// directory and itself: a checkout of that outer repo could plant a symlink
+// that redirects the inner clone. Paths compare case-insensitively (APFS).
+// A project inside its own meta repo, or inside repos above the .meta
+// directory, is the normal meta layout and stays allowed.
+func refuseNested(projects map[string]Repo, relTo func(string) string) {
+	repoAt := map[string]string{} // lowercased path -> path
+	for dir, r := range projects {
+		if r.Bad == "" {
+			repoAt[strings.ToLower(dir)] = dir
+		}
+	}
+	for dir, r := range projects {
+		if r.Bad != "" || r.Base == "" {
+			continue
+		}
+		base := strings.ToLower(r.Base)
+		for a := filepath.Dir(dir); inside(r.Base, a, false); a = filepath.Dir(a) {
+			outer, ok := repoAt[strings.ToLower(a)]
+			if !ok || strings.ToLower(a) == base {
+				continue
+			}
+			r.Bad = fmt.Sprintf("project path %q is nested inside project %q", relTo(dir), relTo(outer))
+			projects[dir] = r
+			break
+		}
+		// a sibling that differs only in case is the same directory on APFS
+		if other, ok := repoAt[strings.ToLower(dir)]; ok && other != dir && r.Bad == "" {
+			r.Bad = fmt.Sprintf("project path %q collides with %q (case)", relTo(dir), relTo(other))
+			projects[dir] = r
+		}
+	}
+}
+
+// unsafeRune reports control and invisible formatting characters (ESC, CR,
+// NUL, bidi overrides, …) that could rewrite the terminal or disguise a host.
+func unsafeRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+}
+
+// validKeyPart reports whether one path component of a .meta key uses only
+// printable ASCII letters, digits and ._-+@ and does not start with a dot.
+// This rules out .git (in any case), traversal, control and bidi characters,
+// Unicode normalisation and case tricks.
+func validKeyPart(c string) bool {
+	if c == "" || c[0] == '.' {
+		return false
+	}
+	for i := 0; i < len(c); i++ {
+		b := c[i]
+		switch {
+		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		case b == '.', b == '_', b == '-', b == '+', b == '@':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // metaProjectPath resolves a .meta project key to a directory strictly inside
 // dir, also after resolving symlinks of its nearest existing parent.
 func metaProjectPath(dir, key string) (string, error) {
-	if key == "" || strings.HasPrefix(key, "/") || filepath.IsAbs(key) {
-		return "", errors.New("must be a relative path")
+	for _, c := range strings.Split(key, "/") {
+		if !validKeyPart(c) {
+			return "", fmt.Errorf("unsupported character in project path: %q", key)
+		}
 	}
 	p := filepath.Join(dir, filepath.FromSlash(key))
 	if !inside(dir, p, false) {
-		return "", errors.New("points outside the .meta directory")
+		return "", fmt.Errorf("project path %q points outside the .meta directory", key)
 	}
-	realDir, err := filepath.EvalSymlinks(dir)
+	if err := checkContained(dir, p); err != nil {
+		return "", fmt.Errorf("project path %q: %v", key, err)
+	}
+	return p, nil
+}
+
+// checkContained verifies that p, after resolving the symlinks of its nearest
+// existing ancestor (or p itself), still lies inside base.
+func checkContained(base, p string) error {
+	if !inside(base, p, true) {
+		return errors.New("points outside the .meta directory")
+	}
+	realBase, err := filepath.EvalSymlinks(base)
 	if err != nil {
-		return "", err
+		return err
 	}
 	a := p
-	for a != dir && !fileExists(a) {
+	for a != base && !fileExists(a) {
 		a = filepath.Dir(a)
 	}
 	realA, err := filepath.EvalSymlinks(a)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if !inside(realDir, realA, true) {
-		return "", errors.New("resolves outside the .meta directory via a symlink")
+	if !inside(realBase, realA, true) {
+		return errors.New("resolves outside the .meta directory via a symlink")
 	}
-	return p, nil
+	return nil
+}
+
+// removeIn deletes p below base through an os.Root, so a symlink swapped in
+// meanwhile cannot redirect the deletion. It refuses paths that escape base,
+// also via symlinks. Non-recursive removal leaves non-empty dirs alone.
+func removeIn(base, p string, recursive bool) error {
+	if !inside(base, p, false) {
+		return errors.New("refusing to remove a path outside the .meta directory")
+	}
+	if err := checkContained(base, filepath.Dir(p)); err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(base, p)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if recursive {
+		return root.RemoveAll(rel)
+	}
+	return root.Remove(rel)
+}
+
+// mkdirAllIn creates dir below base one level at a time through an os.Root
+// (symlinks cannot lead outside base) and returns the dirs it created,
+// outermost first.
+func mkdirAllIn(base, dir string) ([]string, error) {
+	rel, err := filepath.Rel(base, dir)
+	if err != nil || !inside(base, dir, true) {
+		return nil, errors.New("refusing to create a directory outside the .meta directory")
+	}
+	if rel == "." {
+		return nil, nil
+	}
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	var created []string
+	cur := ""
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		switch err := root.Mkdir(cur, 0o755); {
+		case err == nil:
+			created = append(created, filepath.Join(base, cur))
+		case errors.Is(err, fs.ErrExist):
+		default:
+			return created, err
+		}
+	}
+	return created, nil
+}
+
+// cleanupClone removes a failed clone: the target dir (which did not exist
+// before) recursively, then the parents this job created, deepest first and
+// only while empty.
+func cleanupClone(base, target string, parents []string) {
+	removeIn(base, target, true)
+	for i := len(parents) - 1; i >= 0; i-- {
+		removeIn(base, parents[i], false)
+	}
 }
 
 // inside reports whether p is below base (or equal to it, if allowEqual).
@@ -250,6 +400,9 @@ type SyncOpts struct {
 	// Rediscover re-reads the repo list after the meta repos are pulled, so
 	// projects added upstream show up (as missing). Optional.
 	Rediscover func() ([]Repo, error)
+	// HostsFrom are existing repos whose origin hosts may be prewarmed even
+	// though they are not synced in this run (the TUI's clone-missing step).
+	HostsFrom []Repo
 }
 
 // SyncEvent is a repo status update, a replaced repo list, or a progress note.
@@ -262,7 +415,7 @@ type SyncEvent struct {
 
 // repoInfo is what runSync learns about a repo before pulling.
 type repoInfo struct {
-	remote string // origin URL (existing repo) or .meta URL (missing)
+	origin string // origin URL of an existing repo ("" for missing ones)
 	ownSSH bool   // core.sshCommand is set: leave its ssh alone
 }
 
@@ -298,7 +451,13 @@ func runSync(ctx context.Context, repos []Repo, o SyncOpts) <-chan SyncEvent {
 		if !globalSSH {
 			if mux, err := newSSHMux(); err == nil {
 				defer mux.close()
-				for _, t := range sshTargets(repos, info) {
+				trusted := trustedHosts(info)
+				if len(o.HostsFrom) > 0 {
+					for t := range trustedHosts(inspectRepos(ctx, o.HostsFrom, o.Jobs)) {
+						trusted[t] = true
+					}
+				}
+				for _, t := range prewarmTargets(repos, info, trusted, o.Clone) {
 					send(SyncEvent{Note: "connecting to " + t.host + "…"})
 					mux.prewarm(ctx, t)
 				}
@@ -376,13 +535,20 @@ func runSync(ctx context.Context, repos []Repo, o SyncOpts) <-chan SyncEvent {
 				}
 			}
 		}
-		var rest []int
-		for i := range cur {
-			if !done[i] {
-				rest = append(rest, i)
+		// pulls first; clones only after every pull and checkout has finished,
+		// so no concurrent checkout can plant a symlink under a clone target
+		var pulls, clones []int
+		for i, r := range cur {
+			switch {
+			case done[i]:
+			case r.Bad == "" && !fileExists(r.Dir):
+				clones = append(clones, i)
+			default:
+				pulls = append(pulls, i)
 			}
 		}
-		pool(rest)
+		pool(pulls)
+		pool(clones)
 
 		for i := range cur {
 			if ctx.Err() == nil && authTransient(results[i]) {
@@ -409,9 +575,8 @@ func inspectRepos(ctx context.Context, repos []Repo, jobs int) map[string]repoIn
 					dir := r.Dir
 					if isRepo(dir) {
 						out, _, _ := git(ctx, nil, dir, "remote", "get-url", "origin")
-						in.remote = strings.TrimSpace(out)
+						in.origin = strings.TrimSpace(out)
 					} else {
-						in.remote = r.URL
 						for dir != "/" && !isDir(dir) {
 							dir = filepath.Dir(dir)
 						}
@@ -491,23 +656,42 @@ func parseSSHRemote(raw string) (sshTarget, bool) {
 		}
 		t.host = strings.Trim(t.host, "[]")
 	}
-	if t.host == "" || strings.HasPrefix(t.host, "-") || strings.HasPrefix(t.user, "-") {
+	if t.host == "" || strings.HasPrefix(t.host, "-") || strings.HasPrefix(t.user, "-") ||
+		strings.ContainsFunc(t.host+t.user, unsafeRune) {
 		return sshTarget{}, false
 	}
 	return t, true
 }
 
-// sshTargets returns the distinct ssh destinations of repos that use the
-// default ssh command.
-func sshTargets(repos []Repo, info map[string]repoInfo) []sshTarget {
+// trustedHosts returns the ssh destinations that existing repos' origins
+// already use. Only these are ever prewarmed.
+func trustedHosts(info map[string]repoInfo) map[sshTarget]bool {
+	trusted := map[sshTarget]bool{}
+	for _, in := range info {
+		if t, ok := parseSSHRemote(in.origin); ok && !in.ownSSH {
+			trusted[t] = true
+		}
+	}
+	return trusted
+}
+
+// prewarmTargets returns the distinct ssh destinations to open masters for:
+// origins of existing repos, plus (only when cloning) .meta URLs of missing
+// repos whose host is already trusted. A plain pull never connects anywhere
+// for a missing repo, and a host known only from a .meta file gets no master.
+func prewarmTargets(repos []Repo, info map[string]repoInfo, trusted map[sshTarget]bool, clone bool) []sshTarget {
 	seen := map[sshTarget]bool{}
 	var ts []sshTarget
 	for _, r := range repos {
 		in := info[r.Dir]
-		if in.ownSSH {
+		raw := in.origin
+		if raw == "" && clone && r.Bad == "" && !fileExists(r.Dir) {
+			raw = r.URL
+		}
+		if in.ownSSH || raw == "" {
 			continue
 		}
-		if t, ok := parseSSHRemote(in.remote); ok && !seen[t] {
+		if t, ok := parseSSHRemote(raw); ok && trusted[t] && !seen[t] {
 			seen[t] = true
 			ts = append(ts, t)
 		}
@@ -592,6 +776,12 @@ func syncRepo(ctx context.Context, r Repo, o SyncOpts, env []string) RepoResult 
 		return res
 	}
 
+	if r.Base != "" { // a listed project: its path must still resolve inside the .meta dir
+		if err := checkContained(r.Base, r.Dir); err != nil {
+			res.Status, res.Err = StFailed, "refused: "+err.Error()
+			return res
+		}
+	}
 	if !fileExists(r.Dir) {
 		if !o.Clone {
 			res.Status = StMissing
@@ -605,17 +795,29 @@ func syncRepo(ctx context.Context, r Repo, o SyncOpts, env []string) RepoResult 
 			res.Status, res.Err = StFailed, fmt.Sprintf("invalid clone URL %q", r.URL)
 			return res
 		}
-		created := firstMissing(filepath.Dir(r.Dir))
-		if err := os.MkdirAll(filepath.Dir(r.Dir), 0o755); err != nil {
+		if r.Base == "" {
+			res.Status, res.Err = StFailed, "refused: not listed in a .meta file"
+			return res
+		}
+		parents, err := mkdirAllIn(r.Base, filepath.Dir(r.Dir))
+		if err != nil {
+			cleanupClone(r.Base, r.Dir, parents)
 			return fail("", err)
+		}
+		if err := checkContained(r.Base, r.Dir); err != nil || fileExists(r.Dir) { // re-check right before cloning
+			for i := len(parents) - 1; i >= 0; i-- {
+				removeIn(r.Base, parents[i], false)
+			}
+			res.Status, res.Err = StFailed, "refused: changed on disk before cloning"
+			if err != nil {
+				res.Err = "refused: " + err.Error()
+			}
+			return res
 		}
 		stdout, stderr, err := git(ctx, env, "", "clone", "--", r.URL, r.Dir)
 		res.Output = stdout + stderr
 		if err != nil {
-			os.RemoveAll(r.Dir) // did not exist before this run
-			if created != "" {
-				os.RemoveAll(created)
-			}
+			cleanupClone(r.Base, r.Dir, parents) // only what this job created, only inside Base
 			return fail(stderr, err)
 		}
 		res.Status = StCloned
@@ -644,20 +846,6 @@ func syncRepo(ctx context.Context, r Repo, o SyncOpts, env []string) RepoResult 
 	return res
 }
 
-// firstMissing returns the topmost ancestor of p (or p) that doesn't exist.
-func firstMissing(p string) string {
-	missing := ""
-	for !fileExists(p) {
-		missing = p
-		parent := filepath.Dir(p)
-		if parent == p {
-			break
-		}
-		p = parent
-	}
-	return missing
-}
-
 // git runs git in its own process group. Cancelling ctx sends SIGTERM to the
 // group (git and its ssh); WaitDelay is the SIGKILL fallback. A nil env
 // means the plain non-prompting environment.
@@ -677,6 +865,34 @@ func git(ctx context.Context, env []string, dir string, args ...string) (string,
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// sanitize makes untrusted text (paths from .meta files, git output) safe to
+// print: control and formatting characters become \uXXXX, except newlines
+// and tabs when multiline is set.
+func sanitize(s string, multiline bool) string {
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsPrint(r) }) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 { // invalid byte, e.g. a raw C1 CSI 0x9B
+			fmt.Fprintf(&b, "\\x%02X", s[i])
+			i++
+			continue
+		}
+		i += size
+		switch {
+		case multiline && (r == '\n' || r == '\t'):
+			b.WriteRune(r)
+		case unicode.IsPrint(r):
+			b.WriteRune(r)
+		default:
+			fmt.Fprintf(&b, "\\u%04X", r)
+		}
+	}
+	return b.String()
 }
 
 // errLine picks the first meaningful stderr line, skipping fetch progress

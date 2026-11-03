@@ -150,7 +150,7 @@ func appVersion() string {
 func run(args []string) int {
 	o, err := parseArgs(args)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "clauder:", err)
+		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 2
 	}
 	if o.help {
@@ -163,13 +163,13 @@ func run(args []string) int {
 	}
 	path, err := configPath(o.config)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "clauder:", err)
+		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 1
 	}
 	if o.editConfig { // before loading, so a broken config can be fixed
 		if !fileExists(path) {
 			if _, _, err := loadConfig(path); err != nil {
-				fmt.Fprintln(os.Stderr, "clauder:", err)
+				fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 				return 1
 			}
 		}
@@ -177,11 +177,11 @@ func run(args []string) int {
 	}
 	cfg, created, err := loadConfig(path)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "clauder:", err)
+		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 1
 	}
 	if created {
-		fmt.Fprintln(os.Stderr, dim("clauder: created default config at "+tildePath(path)))
+		fmt.Fprintln(os.Stderr, dim("clauder: created default config at "+safePath(path)))
 	}
 	if o.pull {
 		return runPull(cfg, o)
@@ -230,7 +230,7 @@ func runTUI(cfg *Config, start startOpts) (string, int) {
 		return "", 130
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "clauder:", err)
+		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return "", 1
 	}
 	fm := final.(*model)
@@ -248,23 +248,23 @@ func act(cfg *Config, o options, dir string) int {
 		fmt.Println(dir)
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, dim("→ "+dir))
+	fmt.Fprintln(os.Stderr, dim("→ "+sanitize(dir, false)))
 	bin, err := exec.LookPath(cfg.Command)
 	if err == nil {
 		bin, err = filepath.Abs(bin) // a relative PATH hit must survive the chdir
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "clauder:", err)
+		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 127
 	}
 	if err := os.Chdir(dir); err != nil {
-		fmt.Fprintln(os.Stderr, "clauder:", err)
+		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 1
 	}
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "PWD=") })
 	env = append(env, "PWD="+dir)
 	err = syscall.Exec(bin, append([]string{cfg.Command}, o.pass...), env)
-	fmt.Fprintln(os.Stderr, "clauder:", err)
+	fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 	return 1
 }
 
@@ -280,7 +280,7 @@ func editConfig(path string) int {
 		if errors.As(err, &ee) {
 			return ee.ExitCode()
 		}
-		fmt.Fprintln(os.Stderr, "clauder:", err)
+		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 1
 	}
 	return 0
@@ -294,11 +294,11 @@ func runPull(cfg *Config, o options) int {
 	target, _ = filepath.Abs(target)
 	repos, err := discover(target, cfg.Search.Ignore, cfg.Git.Exclude)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "clauder:", err)
+		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 1
 	}
 	if len(repos) == 0 {
-		fmt.Fprintln(os.Stderr, "clauder: no git repositories under", tildePath(target))
+		fmt.Fprintln(os.Stderr, "clauder: no git repositories under", safePath(target))
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -316,10 +316,10 @@ func runPull(cfg *Config, o options) int {
 		return "\x1b[" + code + "m" + s + "\x1b[0m"
 	}
 	line := func(r RepoResult) string {
-		l := statusIcon(r.Status) + " " + r.Rel
+		l := statusIcon(r.Status) + " " + sanitize(r.Rel, false)
 		switch r.Status {
 		case StFailed:
-			l = paint("31", l) + ": " + r.Err
+			l = paint("31", l) + ": " + sanitize(r.Err, false)
 		case StUpdated, StCloned:
 			l = paint("32", l)
 		case StMissing:
@@ -342,7 +342,7 @@ func runPull(cfg *Config, o options) int {
 	for ev := range runSync(ctx, repos, opts) {
 		switch r := ev.Result; {
 		case ev.Note != "":
-			fmt.Fprintln(os.Stderr, dim(ev.Note))
+			fmt.Fprintln(os.Stderr, dim(sanitize(ev.Note, false)))
 		case ev.Repos != nil:
 			list = ev.Repos
 		case r.Status == StRunning || r.Status == StPending:

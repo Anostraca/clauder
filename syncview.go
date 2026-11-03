@@ -110,6 +110,13 @@ func (m *model) runJobs(indexes []int, clone, rediscover bool) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel, s.idx, s.running = cancel, indexes, true
 	o := SyncOpts{Jobs: m.cfg.Git.Jobs, Timeout: m.cfg.GitTimeout(), Clone: clone}
+	if clone { // prewarm only hosts that the existing repos' origins already use
+		for _, r := range s.results {
+			if r.Status != StMissing && r.Bad == "" {
+				o.HostsFrom = append(o.HostsFrom, r.Repo)
+			}
+		}
+	}
 	if rediscover {
 		target, ignore, exclude := s.target, m.cfg.Search.Ignore, m.cfg.Git.Exclude
 		o.Rediscover = func() ([]Repo, error) { return discover(target, ignore, exclude) }
@@ -239,10 +246,10 @@ func (m *model) syncRow(r RepoResult) string {
 	case StMissing:
 		icon = warnS.Render("∅")
 	}
-	s := icon + " " + r.Rel
+	s := icon + " " + sanitize(r.Rel, false)
 	switch r.Status {
 	case StFailed:
-		s += dimS.Render(": " + r.Err)
+		s += dimS.Render(": " + sanitize(r.Err, false))
 	case StMissing:
 		s += " " + dimS.Render("(missing)")
 	case StCloned:
@@ -256,7 +263,7 @@ func (m *model) syncRow(r RepoResult) string {
 
 func (m *model) viewSync(b *strings.Builder) {
 	s := &m.sync
-	b.WriteString("  " + boldS.Render("pull") + " " + s.label + "\n")
+	b.WriteString("  " + boldS.Render("pull") + " " + sanitize(s.label, false) + "\n")
 	if s.detail && s.sel < len(s.results) {
 		r := s.results[s.sel]
 		b.WriteString("  " + m.syncRow(r) + "\n\n")
@@ -267,6 +274,7 @@ func (m *model) viewSync(b *strings.Builder) {
 		if out == "" {
 			out = "(no output)"
 		}
+		out = sanitize(out, true)
 		lines := strings.Split(out, "\n")
 		if limit := m.rows(len(lines), 1); len(lines) > limit {
 			lines = append(lines[:limit], fmt.Sprintf("… %d more lines", len(lines)-limit))
@@ -281,9 +289,9 @@ func (m *model) viewSync(b *strings.Builder) {
 	case s.discovering:
 		b.WriteString("  " + dimS.Render(spinFrames[s.frame%len(spinFrames)]+" discovering repositories…") + "\n")
 	case s.err != "":
-		b.WriteString("  " + errS.Render(s.err) + "\n")
+		b.WriteString("  " + errS.Render(sanitize(s.err, false)) + "\n")
 	case s.note != "":
-		b.WriteString("  " + dimS.Render(spinFrames[s.frame%len(spinFrames)]+" "+s.note) + "\n")
+		b.WriteString("  " + dimS.Render(spinFrames[s.frame%len(spinFrames)]+" "+sanitize(s.note, false)) + "\n")
 	default:
 		status := summarize(s.results)
 		if s.running {

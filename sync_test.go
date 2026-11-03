@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 func writeFile(t *testing.T, path, data string) {
@@ -455,5 +457,234 @@ func TestSyncCancelKillsClone(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if out, err := exec.Command("pgrep", "-f", fake).Output(); err == nil {
 		t.Errorf("leftover processes: %s", out)
+	}
+}
+
+func TestMetaKeyControlCharsRejected(t *testing.T) {
+	d := t.TempDir()
+	writeFile(t, d+"/.meta", `{"projects":{"a\u001b[2Jb":"u","r\u202eversed":"u","ok":"u"}}`)
+	repos, _ := discover(d, defaultIgnore, nil)
+	bad := badRows(repos)
+	if len(bad) != 2 {
+		t.Fatalf("bad rows = %q", bad)
+	}
+	for _, reason := range bad {
+		if !strings.Contains(reason, "unsupported character in project path") || strings.ContainsAny(reason, "\x1b\u202e") {
+			t.Errorf("reason must escape the key: %q", reason)
+		}
+	}
+}
+
+func TestSanitize(t *testing.T) {
+	in := "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\r\u202ed\n\te"
+	got := sanitize(in, false)
+	if strings.ContainsFunc(got, func(r rune) bool { return !unicode.IsPrint(r) }) {
+		t.Fatalf("not sanitized: %q", got)
+	}
+	if !strings.Contains(got, `\u001B]52;`) || !strings.Contains(got, `\u001B[2J`) {
+		t.Errorf("escapes not shown: %q", got)
+	}
+	if ml := sanitize(in, true); !strings.Contains(ml, "\n\te") || strings.Contains(ml, "\x1b") {
+		t.Errorf("multiline: %q", ml)
+	}
+}
+
+func TestNestedProjectsRejected(t *testing.T) {
+	d := t.TempDir()
+	writeFile(t, d+"/.meta", `{"projects":{"a":"u","a/b":"u","c":"u"}}`)
+	repos, _ := discover(d, defaultIgnore, nil)
+	bad := badRows(repos)
+	if len(bad) != 1 || !strings.Contains(bad["a/b"], `nested inside project "a"`) {
+		t.Fatalf("bad rows = %q", bad)
+	}
+}
+
+func TestCloneRefusesSymlinkPlantedAfterDiscovery(t *testing.T) {
+	isolateGit(t)
+	d, outside := t.TempDir(), t.TempDir()
+	bare, _ := remoteFixture(t, d)
+	ws := filepath.Join(d, "ws")
+	writeFile(t, ws+"/.meta", `{"projects":{"sub/p":"`+bare+`"}}`)
+	repos, err := discover(ws, defaultIgnore, nil)
+	if err != nil || len(repos) != 1 || repos[0].Bad != "" {
+		t.Fatalf("discover: %v %+v", err, repos)
+	}
+	if err := os.Symlink(outside, ws+"/sub"); err != nil { // planted after discovery
+		t.Fatal(err)
+	}
+	r := syncRepo(context.Background(), repos[0], SyncOpts{Clone: true, Timeout: 30 * time.Second}, nil)
+	if r.Status != StFailed || !strings.Contains(r.Err, "refused") {
+		t.Fatalf("result %+v", r)
+	}
+	if fileExists(outside + "/p") {
+		t.Fatal("cloned outside the .meta directory")
+	}
+}
+
+func TestRemoveCreatedRefusesEscape(t *testing.T) {
+	base, outside := t.TempDir(), t.TempDir()
+	writeFile(t, outside+"/victim/keep", "x")
+	os.Symlink(outside, base+"/link")
+	if err := removeIn(base, base+"/link/victim", true); err == nil {
+		t.Error("removal through a symlink allowed")
+	}
+	if err := removeIn(base, outside+"/victim", true); err == nil {
+		t.Error("removal outside base allowed")
+	}
+	if !fileExists(outside + "/victim/keep") {
+		t.Fatal("victim deleted")
+	}
+	mkdirs(t, base, "mine/x")
+	if err := removeIn(base, base+"/mine", true); err != nil || fileExists(base+"/mine") {
+		t.Fatalf("own dir not removed: %v", err)
+	}
+}
+
+func TestPrewarmTargetsOnlyTrustedOrigins(t *testing.T) {
+	d := t.TempDir()
+	mkdirs(t, d, "have/.git")
+	existing := Repo{Dir: d + "/have", URL: "git@meta-only.example:x.git"}
+	missingA := Repo{Dir: d + "/gone-a", URL: "git@git.example.com:a.git", Base: d}
+	missingB := Repo{Dir: d + "/gone-b", URL: "git@meta-only.example:b.git", Base: d}
+	info := map[string]repoInfo{existing.Dir: {origin: "git@git.example.com:have.git"}, missingA.Dir: {}, missingB.Dir: {}}
+	trusted := trustedHosts(info)
+	host := func(ts []sshTarget) []string {
+		var out []string
+		for _, t := range ts {
+			out = append(out, t.host)
+		}
+		return out
+	}
+	// a plain pull of missing repos opens nothing
+	if got := prewarmTargets([]Repo{missingA, missingB}, info, trusted, false); len(got) != 0 {
+		t.Errorf("plain pull prewarms %v", host(got))
+	}
+	// with clone, only hosts existing origins already use; the .meta URL of an existing repo is ignored
+	if got := host(prewarmTargets([]Repo{existing, missingA, missingB}, info, trusted, true)); !reflect.DeepEqual(got, []string{"git.example.com"}) {
+		t.Errorf("clone prewarms %v", got)
+	}
+	if got := prewarmTargets([]Repo{missingB}, info, trusted, true); len(got) != 0 {
+		t.Errorf(".meta-only host prewarmed: %v", host(got))
+	}
+}
+
+func TestMetaKeyPolicy(t *testing.T) {
+	d := t.TempDir()
+	writeFile(t, d+"/.meta", `{"projects":{".git":"u",".GIT":"u","sub/.git":"u","a b":"u","caf\u00e9":"u","x\u200by":"u","a//b":"u","ok-1.x_y+z@v":"u","grp/repo.git":"u"}}`)
+	repos, _ := discover(d, defaultIgnore, nil)
+	bad := badRows(repos)
+	for _, k := range []string{".git", ".GIT", "sub/.git", "a b", "caf\u00e9", "x\u200by", "a//b"} {
+		if !strings.Contains(bad[".meta: "+k], "unsupported character in project path") {
+			t.Errorf("key %q not rejected: %q", k, bad[".meta: "+k])
+		}
+	}
+	if len(bad) != 7 {
+		t.Errorf("bad rows = %q", bad)
+	}
+}
+
+// A ".GIT" project key must not turn a folder into a repo whose gitdir (with
+// a core.fsmonitor command) comes from the clone URL.
+func TestDotGitKeyCannotPlantGitdir(t *testing.T) {
+	isolateGit(t)
+	d := t.TempDir()
+	marker := filepath.Join(d, "PWNED")
+	evil := filepath.Join(d, "evil")
+	writeFile(t, evil+"/config", "[core]\n\tfsmonitor = \"touch "+marker+"; false\"\n")
+	gitT(t, d, "init", "-q", "-b", "main", evil)
+	gitT(t, evil, "add", "-A")
+	gitT(t, evil, "commit", "-q", "-m", "x")
+	ws := filepath.Join(d, "ws")
+	writeFile(t, ws+"/sub/.meta", `{"projects":{".GIT":"`+evil+`",".git":"`+evil+`"}}`)
+	for range 2 { // clone, then pull with the result
+		repos, _ := discover(ws, defaultIgnore, nil)
+		for ev := range runSync(context.Background(), repos, SyncOpts{Clone: true, Timeout: 30 * time.Second}) {
+			if ev.Result.Status == StCloned {
+				t.Errorf("cloned %s", ev.Result.Rel)
+			}
+		}
+	}
+	if fileExists(marker) || isRepo(ws+"/sub") {
+		t.Fatal("attacker gitdir planted")
+	}
+}
+
+func TestNestingAcrossMetaAndPlainRepos(t *testing.T) {
+	d := t.TempDir()
+	mkdirs(t, d, "Z/.git", "M/.git", "libs/php/.git")
+	writeFile(t, d+"/M/.meta", `{"projects":{"a":"u"}}`)
+	writeFile(t, d+"/libs/.meta", `{"projects":{"php":"u"}}`)
+	writeFile(t, d+"/libs/php/.meta", `{"projects":{"x":"u"}}`) // normal meta layout: allowed
+	writeFile(t, d+"/.meta", `{"projects":{"Z/sub/evil":"u","M/a/b":"u","CaseA":"u","casea/x":"u"}}`)
+	repos, _ := discover(d, defaultIgnore, nil)
+	bad := badRows(repos)
+	for _, rel := range []string{"Z/sub/evil", "M/a/b", "casea/x"} {
+		if !strings.Contains(bad[rel], "nested inside project") {
+			t.Errorf("%s not refused: %q", rel, bad[rel])
+		}
+	}
+	if len(bad) != 3 {
+		t.Errorf("bad rows = %q", bad)
+	}
+}
+
+func TestDiscoverKeepsBaseForExistingProjects(t *testing.T) {
+	d := t.TempDir()
+	mkdirs(t, d, "p/.git")
+	writeFile(t, d+"/.meta", `{"projects":{"p":"u","q":"u"}}`)
+	repos, _ := discover(d, defaultIgnore, nil)
+	for _, r := range repos {
+		if r.Base != d {
+			t.Errorf("%s: base %q, want %q", r.Rel, r.Base, d)
+		}
+	}
+}
+
+func TestSanitizeInvalidUTF8(t *testing.T) {
+	got := sanitize("remote: \x9b31mred\x9b0m", true)
+	if !utf8.ValidString(got) || strings.Contains(got, "\x9b") || !strings.Contains(got, `\x9B31m`) {
+		t.Fatalf("sanitize = %q", got)
+	}
+}
+
+func TestCleanupKeepsSharedParents(t *testing.T) {
+	base := t.TempDir()
+	created, err := mkdirAllIn(base, base+"/a/b/c")
+	if err != nil || len(created) != 3 {
+		t.Fatalf("created %v, %v", created, err)
+	}
+	writeFile(t, base+"/a/other", "x") // another job uses a/
+	mkdirs(t, base, "a/b/c/target/x")
+	cleanupClone(base, base+"/a/b/c/target", created)
+	if fileExists(base+"/a/b") || !fileExists(base+"/a/other") {
+		t.Fatal("cleanup removed too much or too little")
+	}
+	if _, err := mkdirAllIn(base, base+"/../x"); err == nil {
+		t.Fatal("mkdir outside base allowed")
+	}
+}
+
+func TestClonesRunAfterPulls(t *testing.T) {
+	isolateGit(t)
+	d := t.TempDir()
+	bare, _ := remoteFixture(t, d)
+	ws := filepath.Join(d, "ws")
+	for _, n := range []string{"a", "b", "c"} {
+		gitT(t, d, "clone", "-q", bare, filepath.Join(ws, n))
+	}
+	writeFile(t, ws+"/.meta", `{"projects":{"a":"`+bare+`","b":"`+bare+`","c":"`+bare+`","new1":"`+bare+`","new2":"`+bare+`"}}`)
+	repos, _ := discover(ws, defaultIgnore, nil)
+	pullsLeft := 3
+	for ev := range runSync(context.Background(), repos, SyncOpts{Jobs: 8, Clone: true, Timeout: 30 * time.Second}) {
+		r := ev.Result
+		switch {
+		case r.Status == StUpToDate:
+			pullsLeft--
+		case r.Status == StRunning && strings.HasPrefix(r.Rel, "new") && pullsLeft > 0:
+			t.Fatalf("clone %s started while %d pulls were running", r.Rel, pullsLeft)
+		}
+	}
+	if pullsLeft != 0 || !isRepo(ws+"/new1") || !isRepo(ws+"/new2") {
+		t.Fatalf("pullsLeft=%d", pullsLeft)
 	}
 }
