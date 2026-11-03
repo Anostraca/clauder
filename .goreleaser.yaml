@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: clauder
+
+builds:
+  - id: clauder
+    main: .
+    binary: clauder
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: clauder
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Homebrew casks replace the deprecated formulas (brews) and, since Homebrew
+# 4.5, install on Linux too when the cask ships Linux binaries.
+homebrew_casks:
+  - name: clauder
+    binaries: [clauder]
+    homepage: https://github.com/Anostraca/clauder
+    description: Pick a project folder in a terminal menu and run Claude Code there
+    caveats: |
+      clauder starts Claude Code: install it so that `claude` is on your PATH.
+      See https://docs.claude.com/en/docs/claude-code
+    repository:
+      owner: Anostraca
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    hooks:
+      post:
+        # The binary is not notarized: drop the quarantine flag so macOS runs it.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/clauder"]
+          end
