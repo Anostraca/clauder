@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +31,8 @@ Flags (long only; the first unknown argument and everything after it go to claud
   --find QUERY      fuzzy-find a folder; one match runs directly, several open the picker
   --print-path      print the chosen path to stdout instead of running claude
   --favs            start in the favorites view
-  --settings        start in the settings view (manage roots)
+  --settings        start in the settings view (manage roots and accounts)
+  --account NAME    run claude with this account instead of the folder's default
   --pull [PATH]     git pull --ff-only every repo under PATH (default: current dir)
   --clone-missing   with --pull: clone repos listed in .meta files that are missing
   --jobs N          with --pull: parallel git jobs (default: git.jobs from config)
@@ -57,6 +57,7 @@ type options struct {
 	editConfig         bool
 	help, version      bool
 	config             string
+	account            string
 	pull, cloneMissing bool
 	pullPath           string
 	jobs               int
@@ -90,6 +91,10 @@ func parseArgs(args []string) (options, error) {
 			o.find, err = value(&i, a, name)
 		case "--config":
 			o.config, err = value(&i, a, name)
+		case "--account":
+			if o.account, err = value(&i, a, name); err == nil && o.account == "" {
+				err = errors.New("--account needs a value")
+			}
 		case "--jobs":
 			var v string
 			if v, err = value(&i, a, name); err == nil {
@@ -186,6 +191,10 @@ func run(args []string) int {
 	if o.pull {
 		return runPull(cfg, o)
 	}
+	if o.account != "" && cfg.Account(o.account) == nil {
+		fmt.Fprintf(os.Stderr, "clauder: unknown account %q (%s)\n", sanitize(o.account, false), accountNames(cfg))
+		return 2
+	}
 
 	start := startOpts{}
 	switch {
@@ -208,16 +217,20 @@ func run(args []string) int {
 		start = startOpts{mode: modeSettings, msg: "add your project folders with a"}
 	}
 
-	chosen, code := runTUI(cfg, start)
+	start.account = o.account
+	chosen, acct, code := runTUI(cfg, start)
 	if code != 0 {
 		return code
+	}
+	if acct != "" { // picked in the account selector
+		o.account = acct
 	}
 	return act(cfg, o, chosen)
 }
 
 // runTUI renders on /dev/tty (falling back to stdin/stderr) so stdout stays
 // free for --print-path.
-func runTUI(cfg *Config, start startOpts) (string, int) {
+func runTUI(cfg *Config, start startOpts) (chosen, account string, code int) {
 	var in io.Reader = os.Stdin
 	var out io.Writer = os.Stderr
 	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
@@ -227,11 +240,11 @@ func runTUI(cfg *Config, start startOpts) (string, int) {
 	m := newModel(cfg, lipgloss.NewRenderer(out), start)
 	final, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out)).Run()
 	if errors.Is(err, tea.ErrInterrupted) || errors.Is(err, tea.ErrProgramKilled) {
-		return "", 130
+		return "", "", 130
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
-		return "", 1
+		return "", "", 1
 	}
 	fm := final.(*model)
 	fm.stopJobs()
@@ -239,16 +252,25 @@ func runTUI(cfg *Config, start startOpts) (string, int) {
 	if fm.code == 1 {
 		fmt.Fprintln(os.Stderr, dim("cancelled"))
 	}
-	return fm.chosen, fm.code
+	return fm.chosen, fm.chosenAcct, fm.code
 }
 
-// act prints the path (--print-path) or execs the command in it.
+// act prints the path (--print-path) or execs the command in it with the
+// account from --account, else the one resolved for dir.
 func act(cfg *Config, o options, dir string) int {
 	if o.printPath {
 		fmt.Println(dir)
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, dim("→ "+sanitize(dir, false)))
+	acc, _ := cfg.ResolveAccount(dir)
+	if o.account != "" {
+		acc = cfg.Account(o.account)
+	}
+	line := "→ " + sanitize(dir, false)
+	if acc != nil {
+		line += " · " + sanitize(accountDesc(acc), false)
+	}
+	fmt.Fprintln(os.Stderr, dim(line))
 	bin, err := exec.LookPath(cfg.Command)
 	if err == nil {
 		bin, err = filepath.Abs(bin) // a relative PATH hit must survive the chdir
@@ -257,15 +279,26 @@ func act(cfg *Config, o options, dir string) int {
 		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 127
 	}
+	env := buildEnv(os.Environ(), dir, acc) // before the chdir: a relative config_dir resolves from the launch dir
 	if err := os.Chdir(dir); err != nil {
 		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 		return 1
 	}
-	env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "PWD=") })
-	env = append(env, "PWD="+dir)
 	err = syscall.Exec(bin, append([]string{cfg.Command}, o.pass...), env)
 	fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
 	return 1
+}
+
+// accountNames lists the configured account names for error messages.
+func accountNames(cfg *Config) string {
+	if len(cfg.Accounts) == 0 {
+		return "no accounts configured"
+	}
+	names := make([]string, len(cfg.Accounts))
+	for i, a := range cfg.Accounts {
+		names[i] = sanitize(a.Name, false)
+	}
+	return "accounts: " + strings.Join(names, ", ")
 }
 
 func editConfig(path string) int {

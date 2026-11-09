@@ -53,7 +53,13 @@ else `~/.config/clauder/config.json`. Edit it with `clauder --edit-config` or fr
   "favorites": ["~/work/api"],
   "command": "claude",
   "search": { "max_depth": 4, "ignore": [".git", "node_modules", "@eaDir", "#recycle", ".terraform", ".venv"] },
-  "git": { "jobs": 8, "timeout": "120s", "exclude": ["archive"] }
+  "git": { "jobs": 8, "timeout": "120s", "exclude": ["archive"] },
+  "accounts": [
+    { "name": "personal", "config_dir": "~/.claude" },
+    { "name": "work", "config_dir": "~/.claude-work" }
+  ],
+  "default_account": "personal",
+  "folder_accounts": { "~/work": "work" }
 }
 ```
 
@@ -64,6 +70,27 @@ else `~/.config/clauder/config.json`. Edit it with `clauder --edit-config` or fr
 - `search.max_depth` is counted from where the search starts. Names in `search.ignore`, dotdirs,
   and names starting with `@` or `#` are skipped. On macOS the default ignore list also has `Library`.
 - `git.exclude` holds globs matched against repo paths relative to the sync target (`**` works).
+- `accounts`, `default_account` and `folder_accounts` are optional; see [Accounts](#accounts).
+  They are left out of the file while empty.
+
+## Accounts
+
+Use several Claude subscriptions (for example a personal Max plan and a company Team seat) side by side.
+Claude Code keeps one login per config directory (`CLAUDE_CONFIG_DIR`), so each clauder account is a name
+plus a config dir:
+
+- An account whose dir is `~/.claude` (or empty) uses your normal Claude login: clauder runs claude with
+  `CLAUDE_CONFIG_DIR` removed from the environment. Any other dir is passed as `CLAUDE_CONFIG_DIR`.
+- The account for a run is: the folder's own account, else the account of the nearest parent folder that has
+  one (assignments are inherited by subfolders, a deeper one wins), else `default_account`. With no accounts
+  configured clauder leaves the environment alone.
+- The first run with a new account has claude ask you to log in. clauder shows each account's email and
+  plan (e.g. `Team 5x`, `Max 20x`) from Claude's own config; it never reads credentials.
+- Adding an account with a new dir in settings creates the dir (mode 0700) and symlinks your shared setup
+  from `~/.claude` into it: `CLAUDE.md`, `settings.json`, `keybindings.json`, `agents`, `commands`, `hooks`,
+  `output-styles`, `plugins`, `rules`, `skills`. Only items that exist in `~/.claude` and are not in the new
+  dir yet are linked; nothing is replaced. Login, `.claude.json`, history, projects and sessions stay per account.
+- Deleting an account removes it and its folder assignments from the config; its dir stays on disk.
 
 ## Keys
 
@@ -85,16 +112,26 @@ means the folder has subfolders, and a `★` after a name marks a favorite.
 | `F` / `tab` | favorites list: `⏎` runs, `→` opens in browse, `f` removes, `←`/`esc` go back |
 | `+` | add the highlighted folder as a root |
 | `p` | git sync the highlighted folder (see below) |
+| `u` | account selector for the highlighted folder (when accounts are configured) |
 | `s` | settings (top screen) |
 | `q` / `esc` | cancel (exit code 1); `ctrl-c` exits with 130 |
 
 **Search.** Type to filter. Results rank favorites first, then fuzzy score, then shorter path.
 `⏎` runs the highlighted match, `→` opens it in browse mode, `ctrl-f` toggles favorite,
-`ctrl-p` syncs it, `esc` goes back.
+`ctrl-p` syncs it, `ctrl-o` opens the account selector for it, `esc` goes back.
 
-**Settings.** Manage roots. `a` add (path with `tab` completion, then name),
-`r` rename, `d`/`x` delete (asks y/n), `c` cycle colour, `J`/`K` or `shift-↑↓` reorder,
-`esc`/`q` back. Every change is saved immediately.
+**Accounts.** With accounts configured, a dim line under the list shows which account `⏎` would use for the
+highlighted folder, and folders with an account of their own carry a dim `[name]` tag. `u` (or `ctrl-o` in
+search) opens the selector: it lists each account with email, plan and markers for the global default and
+the folder's assignment. `⏎` runs claude there once with the selected account, `s` makes it the folder's
+account (inherited by subfolders), `c` clears the folder's own account so it inherits again, `esc` goes back.
+
+**Settings.** `tab` switches between the roots and accounts panes. Roots: `a` add (path with `tab`
+completion, then name), `r` rename, `d`/`x` delete (asks y/n), `c` cycle colour, `J`/`K` or `shift-↑↓`
+reorder. Accounts: `a` add (name, then config dir with `tab` completion; `~/.claude` is suggested for the
+first account, `~/.claude-<name>` after that), `r` rename, `d`/`x` delete (asks y/n, keeps the dir),
+`⏎` make it the global default (the first account added starts as default). `esc`/`q` back. Every change
+is saved immediately.
 
 ## Git sync
 
@@ -134,6 +171,7 @@ everything from there on is passed to claude unchanged (`clauder --resume`, `cla
 | `--print-path` | print the chosen folder to stdout instead of running claude: `cd "$(clauder --print-path)"` |
 | `--favs` | start in the favorites view |
 | `--settings` | start in settings |
+| `--account NAME` | use this account for this run instead of the folder's (with `--find` and TUI picks; `--print-path` ignores it); an unknown name exits 2 |
 | `--pull [PATH]` | sync repos under PATH (default: current dir); exit 1 if any failed |
 | `--clone-missing` | with `--pull`: clone missing `.meta` repos |
 | `--jobs N` | with `--pull`: parallel git jobs (default `git.jobs`) |

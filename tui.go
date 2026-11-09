@@ -27,6 +27,7 @@ const (
 	modeNew
 	modeSettings
 	modeSync
+	modeAccount
 )
 
 type startOpts struct {
@@ -34,6 +35,7 @@ type startOpts struct {
 	query   string
 	entries []Entry // preloaded search entries (from --find)
 	msg     string
+	account string // --account override
 }
 
 type item struct {
@@ -84,12 +86,15 @@ type model struct {
 
 	set  settingsState
 	sync syncState
+	acct acctState
 	jobs []<-chan SyncEvent // every sync run started, for waitJobs
 
-	chosen   string
-	code     int
-	quitting bool
-	initCmd  tea.Cmd
+	chosen     string
+	chosenAcct string // picked in the account selector; "" = resolve
+	acctFlag   string // --account override for this run
+	code       int
+	quitting   bool
+	initCmd    tea.Cmd
 }
 
 var (
@@ -128,7 +133,7 @@ func newModel(cfg *Config, r *lipgloss.Renderer, s startOpts) *model {
 	if r != nil {
 		initStyles(r)
 	}
-	m := &model{cfg: cfg, msg: s.msg}
+	m := &model{cfg: cfg, msg: s.msg, acctFlag: s.account}
 	m.load("")
 	switch s.mode {
 	case modeFavs:
@@ -191,6 +196,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.settingsKey(msg)
 		case modeSync:
 			return m, m.syncKey(msg)
+		case modeAccount:
+			return m, m.accountKey(msg)
 		}
 	}
 	return m, nil
@@ -329,7 +336,7 @@ func (m *model) pick(key string) (int, bool) {
 		return 0, false
 	}
 	i := m.top + int(key[0]-'1')
-	if i >= len(m.items) || i >= m.top+m.rows(len(m.items), 0) {
+	if i >= len(m.items) || i >= m.top+m.rows(len(m.items), m.acctExtra()) {
 		return 0, false
 	}
 	return i, true
@@ -394,6 +401,13 @@ func (m *model) browseKey(k tea.KeyMsg) tea.Cmd {
 		if ok && !it.favEntry {
 			return m.startSync(it.path)
 		}
+	case "u":
+		switch {
+		case ok && !it.favEntry:
+			m.openAccounts(it.path)
+		case !ok && m.cur != "":
+			m.openAccounts(m.cur)
+		}
 	default:
 		if i, ok := m.pick(key); ok {
 			return m.open(m.items[i], false)
@@ -455,6 +469,10 @@ func (m *model) favsKey(k tea.KeyMsg) tea.Cmd {
 		if ok {
 			m.toggleFav(it.path)
 			m.loadFavs(m.sel)
+		}
+	case "u":
+		if ok {
+			m.openAccounts(it.path)
 		}
 	default:
 		if i, ok := m.pick(key); ok {
@@ -605,6 +623,10 @@ func (m *model) searchKey(k tea.KeyMsg) tea.Cmd {
 			m.stopWalk()
 			return m.startSync(p)
 		}
+	case "ctrl+o":
+		if n > 0 {
+			m.openAccounts(m.results[m.rsel].Path)
+		}
 	default:
 		old := m.input.Value()
 		var cmd tea.Cmd
@@ -722,6 +744,8 @@ func (m *model) View() string {
 		m.viewSettings(&b)
 	case modeSync:
 		m.viewSync(&b)
+	case modeAccount:
+		m.viewAccount(&b)
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
@@ -747,14 +771,16 @@ func (m *model) footer(b *strings.Builder) {
 func (m *model) hint() string {
 	switch m.mode {
 	case modeFavs:
-		return "↑↓ move · ⏎ run · → open · f remove · esc back · q quit"
+		return "↑↓ move · ⏎ run · → open · f remove" + m.acctHint(" · u account") + " · esc back · q quit"
 	case modeBrowse:
 		if m.cur == "" {
-			return "↑↓ move · ⏎ run · → open · / find · f fav · F favs · p pull · s settings · q quit"
+			return "↑↓ move · ⏎ run · → open · / find · f fav · F favs · p pull" + m.acctHint(" · u account") + " · s settings · q quit"
 		}
-		return "↑↓ move · ⏎ run · → open · ← up · . here · / find · n new · f fav · F favs · p pull · q quit"
+		return "↑↓ move · ⏎ run · → open · ← up · . here · / find · n new · f fav · F favs · p pull" + m.acctHint(" · u account") + " · q quit"
 	case modeSearch:
-		return "↑↓ move · ⏎ run · → open · ^f fav · ^p pull · esc back"
+		return "↑↓ move · ⏎ run · → open · ^f fav · ^p pull" + m.acctHint(" · ^o account") + " · esc back"
+	case modeAccount:
+		return "↑↓ move · ⏎ run once · s set for folder · c clear (inherit) · esc back"
 	case modeNew:
 		return "⏎ create & run · tab create & open · esc cancel"
 	case modeSettings:
@@ -801,7 +827,7 @@ func (m *model) viewBrowse(b *strings.Builder) {
 	} else {
 		b.WriteString("  " + m.header() + "\n")
 	}
-	m.list(b, len(m.items), m.sel, &m.top, 0, func(i, slot int, selected bool) string {
+	m.list(b, len(m.items), m.sel, &m.top, m.acctExtra(), func(i, slot int, selected bool) string {
 		it := m.items[i]
 		key := "  "
 		if slot < 9 {
@@ -838,6 +864,7 @@ func (m *model) viewBrowse(b *strings.Builder) {
 		if it.fav {
 			s += " " + starS.Render("★")
 		}
+		s += m.acctTag(it.path)
 		if selected {
 			return "  " + cur.Render("❯") + " " + dimS.Render(key) + " " + s
 		}
@@ -852,6 +879,14 @@ func (m *model) viewBrowse(b *strings.Builder) {
 	default:
 		b.WriteString("    " + dimS.Render("(no subfolders)") + "\n")
 	}
+	target := m.cur
+	if it, ok := m.selected(); ok {
+		target = it.path
+		if it.favEntry {
+			target = ""
+		}
+	}
+	b.WriteString(m.accountLine(target))
 	m.footer(b)
 }
 
@@ -866,12 +901,13 @@ func (m *model) viewSearch(b *strings.Builder) {
 		status += " · searching…"
 	}
 	b.WriteString("  " + dimS.Render(status) + "\n")
-	m.list(b, len(m.results), m.rsel, &m.rtop, 1, func(i, _ int, selected bool) string {
+	m.list(b, len(m.results), m.rsel, &m.rtop, 1+m.acctExtra(), func(i, _ int, selected bool) string {
 		r := m.results[i]
 		s := highlight(r, selected)
 		if r.Fav {
 			s = starS.Render("★") + " " + s
 		}
+		s += m.acctTag(r.Path)
 		if selected {
 			return "  " + fg(r.Color).Render("❯") + " " + s
 		}
@@ -879,6 +915,9 @@ func (m *model) viewSearch(b *strings.Builder) {
 	})
 	if len(m.results) == 0 && !m.walking {
 		b.WriteString("    " + dimS.Render("(no matches)") + "\n")
+	}
+	if len(m.results) > 0 {
+		b.WriteString(m.accountLine(m.results[m.rsel].Path))
 	}
 	m.footer(b)
 }

@@ -26,6 +26,13 @@ type Root struct {
 	Color int    `json:"color,omitempty"` // 0 = auto from palette
 }
 
+// Account is a named Claude login; ConfigDir is its CLAUDE_CONFIG_DIR
+// ("" or ~/.claude = Claude's default config).
+type Account struct {
+	Name      string `json:"name"`
+	ConfigDir string `json:"config_dir"`
+}
+
 type SearchConfig struct {
 	MaxDepth int      `json:"max_depth"`
 	Ignore   []string `json:"ignore"`
@@ -45,11 +52,16 @@ type Config struct {
 	Search    SearchConfig `json:"search"`
 	Git       GitConfig    `json:"git"`
 
+	Accounts       []Account         `json:"accounts,omitempty"`
+	DefaultAccount string            `json:"default_account,omitempty"`
+	FolderAccounts map[string]string `json:"folder_accounts,omitempty"` // folder path -> account name
+
 	file  string
 	extra map[string]json.RawMessage // unknown top-level keys, kept on save
 }
 
-var configKeys = []string{"roots", "favorites", "command", "search", "git"}
+var configKeys = []string{"roots", "favorites", "command", "search", "git",
+	"accounts", "default_account", "folder_accounts"}
 
 var defaultIgnore = func() []string {
 	ig := []string{".git", "node_modules", "@eaDir", "#recycle", ".terraform", ".venv"}
@@ -115,6 +127,16 @@ func loadConfig(path string) (cfg *Config, created bool, err error) {
 	}
 	for i, f := range cfg.Favorites {
 		cfg.Favorites[i] = expandPath(f)
+	}
+	for i := range cfg.Accounts {
+		cfg.Accounts[i].ConfigDir = expandPath(cfg.Accounts[i].ConfigDir)
+	}
+	if len(cfg.FolderAccounts) > 0 {
+		fa := make(map[string]string, len(cfg.FolderAccounts))
+		for p, name := range cfg.FolderAccounts {
+			fa[expandPath(p)] = name
+		}
+		cfg.FolderAccounts = fa
 	}
 	if created {
 		if err := cfg.Save(); err != nil {
@@ -204,6 +226,16 @@ func (c *Config) marshal() ([]byte, error) {
 	for i, f := range c.Favorites {
 		favs[i] = tildePath(f)
 	}
+	accts := slices.Clone(c.Accounts)
+	for i := range accts {
+		accts[i].ConfigDir = tildePath(accts[i].ConfigDir)
+	}
+	folders := make(map[string]string, len(c.FolderAccounts))
+	for p, name := range c.FolderAccounts {
+		folders[tildePath(p)] = name
+	}
+	omit := map[string]bool{ // account keys are left out when empty
+		"accounts": len(accts) == 0, "default_account": c.DefaultAccount == "", "folder_accounts": len(folders) == 0}
 	var b bytes.Buffer
 	b.WriteString("{")
 	write := func(k string, raw []byte) error {
@@ -216,7 +248,10 @@ func (c *Config) marshal() ([]byte, error) {
 		b.WriteString(": ")
 		return json.Indent(&b, raw, "  ", "  ")
 	}
-	for i, v := range []any{roots, favs, c.Command, c.Search, c.Git} {
+	for i, v := range []any{roots, favs, c.Command, c.Search, c.Git, accts, c.DefaultAccount, folders} {
+		if omit[configKeys[i]] {
+			continue
+		}
 		raw, err := json.Marshal(v)
 		if err != nil {
 			return nil, err
@@ -336,6 +371,120 @@ func validRootName(c *Config, name string, except int) error {
 		return errors.New("name must not contain /")
 	case c.nameTaken(name, except):
 		return fmt.Errorf("a root named %q already exists", name)
+	}
+	return nil
+}
+
+// Account returns the account named name (case-insensitive), or nil.
+func (c *Config) Account(name string) *Account {
+	if i := c.accountIndex(name); i >= 0 {
+		return &c.Accounts[i]
+	}
+	return nil
+}
+
+func (c *Config) accountIndex(name string) int {
+	if name == "" {
+		return -1
+	}
+	return slices.IndexFunc(c.Accounts, func(a Account) bool { return strings.EqualFold(a.Name, name) })
+}
+
+// ResolveAccount returns the account a run in p uses: the deepest folder
+// assignment covering p, else the global default, else nil. folder is the
+// assigned folder, "" when the global default (or nothing) applies.
+// Assignments naming an unknown account are ignored.
+func (c *Config) ResolveAccount(p string) (acc *Account, folder string) {
+	for f, name := range c.FolderAccounts {
+		a := c.Account(name)
+		if a == nil || len(f) <= len(folder) {
+			continue
+		}
+		if p == f || strings.HasPrefix(p, strings.TrimSuffix(f, "/")+"/") {
+			acc, folder = a, f
+		}
+	}
+	if acc != nil {
+		return acc, folder
+	}
+	return c.Account(c.DefaultAccount), ""
+}
+
+// folderAccount is the account explicitly assigned to p, or nil.
+func (c *Config) folderAccount(p string) *Account {
+	if name, ok := c.FolderAccounts[p]; ok {
+		return c.Account(name)
+	}
+	return nil
+}
+
+// SetFolderAccount assigns account name to folder p (and its subfolders) and saves.
+func (c *Config) SetFolderAccount(p, name string) error {
+	if c.FolderAccounts == nil {
+		c.FolderAccounts = map[string]string{}
+	}
+	c.FolderAccounts[p] = name
+	return c.Save()
+}
+
+// ClearFolderAccount removes p's assignment, so it inherits again, and saves.
+func (c *Config) ClearFolderAccount(p string) error {
+	delete(c.FolderAccounts, p)
+	return c.Save()
+}
+
+// AddAccount appends an account and saves. The first one becomes the default.
+func (c *Config) AddAccount(name, dir string) error {
+	if len(c.Accounts) == 0 {
+		c.DefaultAccount = name
+	}
+	c.Accounts = append(c.Accounts, Account{Name: name, ConfigDir: dir})
+	return c.Save()
+}
+
+// RenameAccount renames account i, updating the default and folder
+// assignments that refer to it, and saves.
+func (c *Config) RenameAccount(i int, name string) error {
+	old := c.Accounts[i].Name
+	c.Accounts[i].Name = name
+	if strings.EqualFold(c.DefaultAccount, old) {
+		c.DefaultAccount = name
+	}
+	for p, n := range c.FolderAccounts {
+		if strings.EqualFold(n, old) {
+			c.FolderAccounts[p] = name
+		}
+	}
+	return c.Save()
+}
+
+// DeleteAccount removes account i with its folder assignments (and the
+// default if it was this one) and saves. Its config dir is left on disk.
+func (c *Config) DeleteAccount(i int) error {
+	old := c.Accounts[i].Name
+	c.Accounts = slices.Delete(c.Accounts, i, i+1)
+	if strings.EqualFold(c.DefaultAccount, old) {
+		c.DefaultAccount = ""
+	}
+	maps.DeleteFunc(c.FolderAccounts, func(_, n string) bool { return strings.EqualFold(n, old) })
+	return c.Save()
+}
+
+// SetDefaultAccount makes name the global default and saves.
+func (c *Config) SetDefaultAccount(name string) error {
+	c.DefaultAccount = name
+	return c.Save()
+}
+
+func validAccountName(c *Config, name string, except int) error {
+	switch {
+	case strings.TrimSpace(name) == "":
+		return errors.New("name is empty")
+	case strings.Contains(name, "/"):
+		return errors.New("name must not contain /")
+	}
+	if i := c.accountIndex(name); i >= 0 && i != except {
+		return fmt.Errorf("an account named %q already exists", name)
 	}
 	return nil
 }

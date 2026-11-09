@@ -19,6 +19,10 @@ const (
 	setAddName
 	setRename
 	setDelete
+	setAcctName
+	setAcctDir
+	setAcctRename
+	setAcctDelete
 )
 
 type settingsState struct {
@@ -28,6 +32,10 @@ type settingsState struct {
 	err      string
 	comp     *completion
 	cands    []string
+
+	accounts   bool // the accounts pane is shown (tab toggles)
+	asel, atop int
+	name       string // account name while adding
 }
 
 // completion is an active Tab cycle over directory candidates.
@@ -63,6 +71,14 @@ func (m *model) settingsKey(k tea.KeyMsg) tea.Cmd {
 		return m.settingsInputKey(k)
 	}
 	m.msg, s.err = "", ""
+	if key == "tab" {
+		s.accounts = !s.accounts
+		return nil
+	}
+	if s.accounts {
+		m.accountsPaneKey(key)
+		return nil
+	}
 	n := len(m.cfg.Roots)
 	switch key {
 	case "esc", "q":
@@ -107,6 +123,44 @@ func (m *model) settingsKey(k tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (m *model) accountsPaneKey(key string) {
+	s := &m.set
+	n := len(m.cfg.Accounts)
+	switch key {
+	case "esc", "q":
+		m.leaveSettings()
+	case "up", "k":
+		if n > 0 {
+			s.asel = (s.asel - 1 + n) % n
+		}
+	case "down", "j":
+		if n > 0 {
+			s.asel = (s.asel + 1) % n
+		}
+	case "a":
+		s.sub = setAcctName
+		m.textInput("name: ", "", "work")
+	case "r":
+		if n > 0 {
+			s.sub = setAcctRename
+			m.textInput("name: ", m.cfg.Accounts[s.asel].Name, "")
+		}
+	case "d", "x":
+		if n > 0 {
+			s.sub = setAcctDelete
+		}
+	case "enter":
+		if n > 0 {
+			name := m.cfg.Accounts[s.asel].Name
+			if err := m.cfg.SetDefaultAccount(name); err != nil {
+				s.err = "save failed: " + err.Error()
+				return
+			}
+			m.msg = okS.Render("default account " + sanitize(name, false))
+		}
+	}
+}
+
 // swapRoots reorders two roots, pinning their colours so they don't change.
 func (m *model) swapRoots(i, j int) {
 	r := m.cfg.Roots
@@ -128,6 +182,19 @@ func (m *model) settingsInputKey(k tea.KeyMsg) tea.Cmd {
 		s.sub = setList
 		return nil
 	}
+	if s.sub == setAcctDelete {
+		if key == "y" || key == "Y" {
+			a := m.cfg.Accounts[s.asel]
+			if err := m.cfg.DeleteAccount(s.asel); err != nil {
+				s.err = "save failed: " + err.Error()
+			} else {
+				m.msg = dimS.Render("deleted account " + sanitize(a.Name, false) + " · " + a.dirLabel() + " kept")
+			}
+			s.asel = min(s.asel, max(len(m.cfg.Accounts)-1, 0))
+		}
+		s.sub = setList
+		return nil
+	}
 	if key != "tab" {
 		s.comp, s.cands = nil, nil
 	}
@@ -136,7 +203,7 @@ func (m *model) settingsInputKey(k tea.KeyMsg) tea.Cmd {
 		s.sub, s.err = setList, ""
 		return nil
 	case "tab":
-		if s.sub == setAddPath {
+		if s.sub == setAddPath || s.sub == setAcctDir {
 			v, comp, cands := completeDir(m.input.Value(), s.comp)
 			s.comp, s.cands = comp, cands
 			m.input.SetValue(v)
@@ -191,7 +258,82 @@ func (m *model) settingsSubmit() {
 		m.cfg.Roots[s.sel].Name = v
 		s.sub = setList
 		m.saveSettings("")
+	case setAcctName:
+		v = strings.TrimSpace(v)
+		if err := validAccountName(m.cfg, v, -1); err != nil {
+			s.err = err.Error()
+			return
+		}
+		dir := "~/.claude-" + v
+		if len(m.cfg.Accounts) == 0 {
+			dir = "~/.claude"
+		}
+		s.name, s.sub, s.err = v, setAcctDir, ""
+		m.textInput("config dir: ", dir, "")
+	case setAcctDir:
+		m.addAccount(v)
+	case setAcctRename:
+		v = strings.TrimSpace(v)
+		if err := validAccountName(m.cfg, v, s.asel); err != nil {
+			s.err = err.Error()
+			return
+		}
+		if err := m.cfg.RenameAccount(s.asel, v); err != nil {
+			s.err = "save failed: " + err.Error()
+			return
+		}
+		s.sub = setList
 	}
+}
+
+// addAccount adds the account being entered with config dir v. A dir other
+// than ~/.claude is created and gets the shared config linked in.
+func (m *model) addAccount(v string) {
+	s := &m.set
+	p, err := filepath.Abs(expandPath(strings.TrimSpace(v)))
+	switch {
+	case strings.TrimSpace(v) == "":
+		s.err = "config dir is empty"
+		return
+	case err != nil:
+		s.err = err.Error()
+		return
+	case fileExists(p) && !isDir(p):
+		s.err = tildePath(p) + " is not a directory"
+		return
+	}
+	if err := checkConfigDir(p); err != nil {
+		s.err = err.Error()
+		return
+	}
+	if realPath(p) == realPath(defaultClaudeDir()) { // an alias of ~/.claude is the default config
+		p = defaultClaudeDir()
+	}
+	for _, a := range m.cfg.Accounts {
+		d := a.ConfigDir
+		if isDefaultClaudeDir(d) {
+			d = defaultClaudeDir()
+		}
+		if realPath(d) == realPath(p) {
+			s.err = tildePath(p) + " is already used by account " + a.Name
+			return
+		}
+	}
+	note := "uses the default Claude login"
+	if !isDefaultClaudeDir(p) {
+		n, err := linkShared(defaultClaudeDir(), p)
+		if err != nil {
+			s.err = err.Error()
+			return
+		}
+		note = fmt.Sprintf("%d shared items linked into %s · claude asks to log in on first run", n, tildePath(p))
+	}
+	if err := m.cfg.AddAccount(s.name, p); err != nil {
+		s.err = "save failed: " + err.Error()
+		return
+	}
+	s.asel, s.sub = len(m.cfg.Accounts)-1, setList
+	m.msg = okS.Render("added account "+sanitize(s.name, false)) + dimS.Render(" · "+sanitize(note, false))
 }
 
 // completeDir completes the directory path in v. A single candidate is
@@ -242,7 +384,15 @@ func commonPrefix(ss []string) string {
 
 func (m *model) viewSettings(b *strings.Builder) {
 	s := &m.set
-	b.WriteString("  " + boldS.Render("settings") + "  " + dimS.Render(safePath(m.cfg.file)) + "\n")
+	panes := "[roots] " + dimS.Render("accounts")
+	if s.accounts {
+		panes = dimS.Render("roots") + " [accounts]"
+	}
+	b.WriteString("  " + boldS.Render("settings") + "  " + panes + "  " + dimS.Render(safePath(m.cfg.file)) + "\n")
+	if s.accounts {
+		m.viewAccountsPane(b)
+		return
+	}
 	width := 0
 	for _, r := range m.cfg.Roots {
 		width = max(width, len(r.Name))
@@ -282,16 +432,66 @@ func (m *model) viewSettings(b *strings.Builder) {
 	m.footer(b)
 }
 
+func (m *model) viewAccountsPane(b *strings.Builder) {
+	s := &m.set
+	wName, wDir := 0, 0
+	for _, a := range m.cfg.Accounts {
+		wName, wDir = max(wName, len(sanitize(a.Name, false))), max(wDir, len(a.dirLabel()))
+	}
+	m.list(b, len(m.cfg.Accounts), s.asel, &s.atop, m.settingsExtra(), func(i, _ int, selected bool) string {
+		a := &m.cfg.Accounts[i]
+		name := fmt.Sprintf("%-*s", wName, sanitize(a.Name, false))
+		if selected {
+			name = boldS.Render(name)
+		}
+		line := name + "  " + dimS.Render(fmt.Sprintf("%-*s", wDir, a.dirLabel())) +
+			"  " + sanitize(infoFor(a).summary(), false)
+		if strings.EqualFold(a.Name, m.cfg.DefaultAccount) {
+			line += " " + okS.Render("default")
+		}
+		if selected {
+			return "  ❯ " + line
+		}
+		return "    " + line
+	})
+	if len(m.cfg.Accounts) == 0 {
+		b.WriteString("    " + dimS.Render("(no accounts — claude runs with its default login)") + "\n")
+	}
+	switch s.sub {
+	case setAcctName, setAcctDir, setAcctRename:
+		title := map[setSub]string{setAcctName: "add account", setAcctDir: "add account", setAcctRename: "rename"}[s.sub]
+		b.WriteString("\n  " + dimS.Render(title+" —") + " " + m.input.View() + "\n")
+		if len(s.cands) > 0 {
+			b.WriteString("  " + dimS.Render(sanitize(truncList(s.cands, 8), false)) + "\n")
+		}
+	case setAcctDelete:
+		a := m.cfg.Accounts[s.asel]
+		b.WriteString("\n  " + warnS.Render(fmt.Sprintf("delete account %s? %s is kept. y/n",
+			sanitize(a.Name, false), a.dirLabel())) + "\n")
+	}
+	if s.err != "" {
+		b.WriteString("  " + errS.Render(sanitize(s.err, false)) + "\n")
+	}
+	m.footer(b)
+}
+
 func (m *model) settingsHint() string {
 	switch m.set.sub {
 	case setAddPath:
 		return "tab complete · ⏎ next · esc cancel"
-	case setAddName, setRename:
+	case setAcctDir:
+		return "tab complete · ⏎ add · esc cancel"
+	case setAcctName:
+		return "⏎ next · esc cancel"
+	case setAddName, setRename, setAcctRename:
 		return "⏎ save · esc cancel"
-	case setDelete:
+	case setDelete, setAcctDelete:
 		return "y delete · any other key cancels"
 	}
-	return "↑↓ move · a add · r rename · d delete · c colour · J/K reorder · esc back"
+	if m.set.accounts {
+		return "↑↓ move · a add · r rename · d delete · ⏎ set default · tab roots · esc back"
+	}
+	return "↑↓ move · a add · r rename · d delete · c colour · J/K reorder · tab accounts · esc back"
 }
 
 // settingsExtra counts the lines below the root list (input, completions,
@@ -299,8 +499,7 @@ func (m *model) settingsHint() string {
 func (m *model) settingsExtra() int {
 	s := &m.set
 	n := 0
-	switch s.sub {
-	case setAddPath, setAddName, setRename, setDelete:
+	if s.sub != setList {
 		n += 2
 	}
 	if len(s.cands) > 0 {

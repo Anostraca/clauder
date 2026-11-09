@@ -29,6 +29,8 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"--pull", "--jobs=2"}, options{pull: true, jobs: 2}},
 		{[]string{"--help"}, options{help: true}},
 		{[]string{"--version", "--edit-config"}, options{version: true, editConfig: true}},
+		{[]string{"--account", "work", "--find", "x", "-c"}, options{account: "work", find: "x", hasFind: true, pass: []string{"-c"}}},
+		{[]string{"--account=me", "--print-path"}, options{account: "me", printPath: true}},
 	}
 	for _, c := range cases {
 		got, err := parseArgs(c.args)
@@ -40,7 +42,7 @@ func TestParseArgs(t *testing.T) {
 			t.Errorf("%q:\n got  %+v\n want %+v", c.args, got, c.want)
 		}
 	}
-	for _, bad := range [][]string{{"--find"}, {"--config"}, {"--jobs", "0"}, {"--jobs", "x"}} {
+	for _, bad := range [][]string{{"--find"}, {"--config"}, {"--jobs", "0"}, {"--jobs", "x"}, {"--account"}, {"--account="}} {
 		if _, err := parseArgs(bad); err == nil {
 			t.Errorf("%q: want error", bad)
 		}
