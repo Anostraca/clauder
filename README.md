@@ -102,6 +102,7 @@ means the folder has subfolders, and a `★` after a name marks a favorite.
 |---|---|
 | `↑↓` / `j k` | move (wraps around) |
 | `⏎` | run claude in the highlighted folder |
+| `c` | run `claude --continue` there: pick up the folder's last conversation (in an empty folder: the current folder) |
 | `→` | open it (if it has no subfolders, run claude right away) |
 | `1`–`9` | same as `→` on that visible row |
 | `←` / `-` / `⌫` | go up |
@@ -109,7 +110,7 @@ means the folder has subfolders, and a `★` after a name marks a favorite.
 | `/` | fuzzy search (all roots on the top screen, otherwise the current subtree) |
 | `n` | new folder here: `⏎` creates it and runs claude, `tab` creates it and opens it (no `/`, no leading/trailing spaces, no leading `.` `@` `#`) |
 | `f` | toggle the highlighted folder as a favorite |
-| `F` / `tab` | favorites list: `⏎` runs, `→` opens in browse, `f` removes, `←`/`esc` go back |
+| `F` / `tab` | favorites list: `⏎` runs, `c` continues, `→` opens in browse, `f` removes, `←`/`esc` go back |
 | `+` | add the highlighted folder as a root |
 | `p` | git sync the highlighted folder (see below) |
 | `u` | account selector for the highlighted folder (when accounts are configured) |
@@ -117,7 +118,7 @@ means the folder has subfolders, and a `★` after a name marks a favorite.
 | `q` / `esc` | cancel (exit code 1); `ctrl-c` exits with 130 |
 
 **Search.** Type to filter. Results rank favorites first, then fuzzy score, then shorter path.
-`⏎` runs the highlighted match, `→` opens it in browse mode, `ctrl-f` toggles favorite,
+`⏎` runs the highlighted match, `ctrl-r` runs it with `--continue`, `→` opens it in browse mode, `ctrl-f` toggles favorite,
 `ctrl-p` syncs it, `ctrl-o` opens the account selector for it, `esc` goes back.
 
 **Accounts.** With accounts configured, a dim line under the list shows which account `⏎` would use for the

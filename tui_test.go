@@ -427,3 +427,56 @@ func TestWrapHint(t *testing.T) {
 		t.Fatalf("wrapHint = %q", got)
 	}
 }
+
+func TestTUIContinue(t *testing.T) {
+	cfg, root := fixture(t)
+
+	tm := start(t, cfg, startOpts{}) // browse: highlighted folder
+	tm.Send(key(tea.KeyRight))       // open work
+	waitFor(t, tm, "c continue")
+	tm.Type("jc") // beta
+	if m := finalModel(t, tm); m.code != 0 || !m.cont || m.chosen != filepath.Join(root, "beta") {
+		t.Fatalf("browse: code=%d cont=%v chosen=%q", m.code, m.cont, m.chosen)
+	}
+
+	tm = start(t, cfg, startOpts{}) // browse: plain ⏎ does not continue
+	tm.Send(key(tea.KeyEnter))
+	if m := finalModel(t, tm); m.cont || m.chosen != root {
+		t.Fatalf("enter: cont=%v chosen=%q", m.cont, m.chosen)
+	}
+
+	tm = start(t, cfg, startOpts{}) // empty folder: continue in the current one
+	tm.Type("/beta")
+	waitFor(t, tm, "❯ work/beta")
+	tm.Send(key(tea.KeyRight))
+	waitFor(t, tm, "(no subfolders)")
+	tm.Type("c")
+	if m := finalModel(t, tm); !m.cont || m.chosen != filepath.Join(root, "beta") {
+		t.Fatalf("empty: cont=%v chosen=%q", m.cont, m.chosen)
+	}
+
+	tm = start(t, cfg, startOpts{}) // search
+	tm.Type("/deep")
+	waitFor(t, tm, "❯ work/gamma/deep")
+	tm.Send(key(tea.KeyCtrlR))
+	if m := finalModel(t, tm); !m.cont || m.chosen != filepath.Join(root, "gamma/deep") {
+		t.Fatalf("search: cont=%v chosen=%q", m.cont, m.chosen)
+	}
+
+	if _, err := cfg.ToggleFavorite(filepath.Join(root, "alpha/two")); err != nil {
+		t.Fatal(err)
+	}
+	tm = start(t, cfg, startOpts{mode: modeFavs}) // favorites
+	tm.Type("c")
+	if m := finalModel(t, tm); !m.cont || m.chosen != filepath.Join(root, "alpha/two") {
+		t.Fatalf("favs: cont=%v chosen=%q", m.cont, m.chosen)
+	}
+
+	// a missing folder is refused and must not leave continue armed
+	cfg.Roots = append(cfg.Roots, Root{Name: "gone", Path: filepath.Join(root, "nope")})
+	m := newModel(cfg, nil, startOpts{})
+	m.sel = len(m.items) - 1
+	if cmd := m.browseKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")}); cmd != nil || m.cont || m.chosen != "" {
+		t.Fatalf("missing: cmd=%v cont=%v chosen=%q", cmd != nil, m.cont, m.chosen)
+	}
+}

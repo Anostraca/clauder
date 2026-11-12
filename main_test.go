@@ -49,6 +49,25 @@ func TestParseArgs(t *testing.T) {
 	}
 }
 
+func TestCommandArgs(t *testing.T) {
+	cases := []struct {
+		o    options
+		want []string
+	}{
+		{options{}, []string{"claude"}},
+		{options{pass: []string{"-p", "hi"}}, []string{"claude", "-p", "hi"}},
+		{options{cont: true}, []string{"claude", "--continue"}},
+		{options{cont: true, pass: []string{"fix bug"}}, []string{"claude", "--continue", "fix bug"}},
+		{options{cont: true, pass: []string{"--continue"}}, []string{"claude", "--continue"}},
+		{options{cont: true, pass: []string{"-c"}}, []string{"claude", "-c"}},
+	}
+	for _, c := range cases {
+		if got := commandArgs("claude", c.o); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%+v: got %q, want %q", c.o, got, c.want)
+		}
+	}
+}
+
 func TestPrintPathStdoutOnly(t *testing.T) {
 	cfg, root := fixture(t)
 	r, w, _ := os.Pipe()

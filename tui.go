@@ -92,6 +92,7 @@ type model struct {
 	chosen     string
 	chosenAcct string // picked in the account selector; "" = resolve
 	acctFlag   string // --account override for this run
+	cont       bool   // run with --continue (last conversation in the folder)
 	code       int
 	quitting   bool
 	initCmd    tea.Cmd
@@ -286,6 +287,18 @@ func (m *model) open(it item, run bool) tea.Cmd {
 	return nil
 }
 
+// openContinue runs it like ⏎, continuing the folder's last conversation.
+func (m *model) openContinue(it item) tea.Cmd {
+	cmd := m.open(it, true)
+	m.cont = cmd != nil
+	return cmd
+}
+
+func (m *model) finishContinue(path string) tea.Cmd {
+	m.cont = true
+	return m.finish(path)
+}
+
 func (m *model) up() {
 	if m.cur == "" {
 		return
@@ -401,6 +414,13 @@ func (m *model) browseKey(k tea.KeyMsg) tea.Cmd {
 		if ok && !it.favEntry {
 			return m.startSync(it.path)
 		}
+	case "c":
+		switch {
+		case ok && !it.favEntry:
+			return m.openContinue(it)
+		case !ok && m.cur != "":
+			return m.finishContinue(m.cur)
+		}
 	case "u":
 		switch {
 		case ok && !it.favEntry:
@@ -464,6 +484,10 @@ func (m *model) favsKey(k tea.KeyMsg) tea.Cmd {
 	case "right":
 		if ok {
 			return m.open(it, false)
+		}
+	case "c":
+		if ok {
+			return m.openContinue(it)
 		}
 	case "f":
 		if ok {
@@ -605,6 +629,10 @@ func (m *model) searchKey(k tea.KeyMsg) tea.Cmd {
 	case "enter":
 		if n > 0 {
 			return m.finish(m.results[m.rsel].Path)
+		}
+	case "ctrl+r":
+		if n > 0 {
+			return m.finishContinue(m.results[m.rsel].Path)
 		}
 	case "right":
 		if n > 0 {
@@ -771,14 +799,14 @@ func (m *model) footer(b *strings.Builder) {
 func (m *model) hint() string {
 	switch m.mode {
 	case modeFavs:
-		return "↑↓ move · ⏎ run · → open · f remove" + m.acctHint(" · u account") + " · esc back · q quit"
+		return "↑↓ move · ⏎ run · c continue · → open · f remove" + m.acctHint(" · u account") + " · esc back · q quit"
 	case modeBrowse:
 		if m.cur == "" {
-			return "↑↓ move · ⏎ run · → open · / find · f fav · F favs · p pull" + m.acctHint(" · u account") + " · s settings · q quit"
+			return "↑↓ move · ⏎ run · c continue · → open · / find · f fav · F favs · p pull" + m.acctHint(" · u account") + " · s settings · q quit"
 		}
-		return "↑↓ move · ⏎ run · → open · ← up · . here · / find · n new · f fav · F favs · p pull" + m.acctHint(" · u account") + " · q quit"
+		return "↑↓ move · ⏎ run · c continue · → open · ← up · . here · / find · n new · f fav · F favs · p pull" + m.acctHint(" · u account") + " · q quit"
 	case modeSearch:
-		return "↑↓ move · ⏎ run · → open · ^f fav · ^p pull" + m.acctHint(" · ^o account") + " · esc back"
+		return "↑↓ move · ⏎ run · ^r continue · → open · ^f fav · ^p pull" + m.acctHint(" · ^o account") + " · esc back"
 	case modeAccount:
 		return "↑↓ move · ⏎ run once · s set for folder · c clear (inherit) · esc back"
 	case modeNew:
