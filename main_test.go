@@ -31,6 +31,7 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"--version", "--edit-config"}, options{version: true, editConfig: true}},
 		{[]string{"--account", "work", "--find", "x", "-c"}, options{account: "work", find: "x", hasFind: true, pass: []string{"-c"}}},
 		{[]string{"--account=me", "--print-path"}, options{account: "me", printPath: true}},
+		{[]string{"--sessions", "-r"}, options{sessions: true, pass: []string{"-r"}}},
 	}
 	for _, c := range cases {
 		got, err := parseArgs(c.args)
@@ -60,6 +61,13 @@ func TestCommandArgs(t *testing.T) {
 		{options{cont: true, pass: []string{"fix bug"}}, []string{"claude", "--continue", "fix bug"}},
 		{options{cont: true, pass: []string{"--continue"}}, []string{"claude", "--continue"}},
 		{options{cont: true, pass: []string{"-c"}}, []string{"claude", "-c"}},
+		{options{resume: "id1"}, []string{"claude", "--resume", "id1"}},
+		{options{resume: "id1", pass: []string{"-p", "hi"}}, []string{"claude", "--resume", "id1", "-p", "hi"}},
+		{options{resume: "id1", pass: []string{"--resume"}}, []string{"claude", "--resume"}},
+		{options{resume: "id1", pass: []string{"-r", "x"}}, []string{"claude", "-r", "x"}},
+		{options{resume: "id1", pass: []string{"--resume=x"}}, []string{"claude", "--resume=x"}},
+		{options{resume: "id1", pass: []string{"-c"}}, []string{"claude", "-c"}},
+		{options{resume: "id1", pass: []string{"--continue"}}, []string{"claude", "--continue"}},
 	}
 	for _, c := range cases {
 		if got := commandArgs("claude", c.o); !reflect.DeepEqual(got, c.want) {

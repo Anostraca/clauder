@@ -28,6 +28,7 @@ const (
 	modeSettings
 	modeSync
 	modeAccount
+	modeSessions
 )
 
 type startOpts struct {
@@ -87,12 +88,14 @@ type model struct {
 	set  settingsState
 	sync syncState
 	acct acctState
+	sess sessState
 	jobs []<-chan SyncEvent // every sync run started, for waitJobs
 
 	chosen     string
 	chosenAcct string // picked in the account selector; "" = resolve
 	acctFlag   string // --account override for this run
 	cont       bool   // run with --continue (last conversation in the folder)
+	resume     string // session ID to run with --resume
 	code       int
 	quitting   bool
 	initCmd    tea.Cmd
@@ -141,6 +144,8 @@ func newModel(cfg *Config, r *lipgloss.Renderer, s startOpts) *model {
 		m.openFavs()
 	case modeSettings:
 		m.openSettings()
+	case modeSessions:
+		m.initCmd = m.browseSessions()
 	case modeSearch:
 		m.initCmd = m.startSearch(s.entries, s.query)
 	}
@@ -180,6 +185,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onSync(msg)
 	case tickMsg:
 		return m, m.onTick(msg)
+	case sessionsMsg:
+		m.onSessions(msg)
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, m.quit(130)
@@ -199,6 +206,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.syncKey(msg)
 		case modeAccount:
 			return m, m.accountKey(msg)
+		case modeSessions:
+			return m, m.sessionsKey(msg)
 		}
 	}
 	return m, nil
@@ -389,6 +398,8 @@ func (m *model) browseKey(k tea.KeyMsg) tea.Cmd {
 		}
 	case "/":
 		return m.startSearch(nil, "")
+	case "r":
+		return m.browseSessions()
 	case "n":
 		if m.cur == "" {
 			m.msg = dimS.Render("open a folder first to create a new folder in it")
@@ -489,6 +500,8 @@ func (m *model) favsKey(k tea.KeyMsg) tea.Cmd {
 		if ok {
 			return m.openContinue(it)
 		}
+	case "r":
+		return m.favSessions()
 	case "f":
 		if ok {
 			m.toggleFav(it.path)
@@ -774,6 +787,8 @@ func (m *model) View() string {
 		m.viewSync(&b)
 	case modeAccount:
 		m.viewAccount(&b)
+	case modeSessions:
+		m.viewSessions(&b)
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
@@ -799,14 +814,16 @@ func (m *model) footer(b *strings.Builder) {
 func (m *model) hint() string {
 	switch m.mode {
 	case modeFavs:
-		return "↑↓ move · ⏎ run · c continue · → open · f remove" + m.acctHint(" · u account") + " · esc back · q quit"
+		return "↑↓ move · ⏎ run · c continue · → open · r sessions · f remove" + m.acctHint(" · u account") + " · esc back · q quit"
 	case modeBrowse:
 		if m.cur == "" {
-			return "↑↓ move · ⏎ run · c continue · → open · / find · f fav · F favs · p pull" + m.acctHint(" · u account") + " · s settings · q quit"
+			return "↑↓ move · ⏎ run · c continue · → open · / find · f fav · F favs · r sessions · p pull" + m.acctHint(" · u account") + " · s settings · q quit"
 		}
-		return "↑↓ move · ⏎ run · c continue · → open · ← up · . here · / find · n new · f fav · F favs · p pull" + m.acctHint(" · u account") + " · q quit"
+		return "↑↓ move · ⏎ run · c continue · → open · ← up · . here · / find · n new · f fav · F favs · r sessions · p pull" + m.acctHint(" · u account") + " · q quit"
 	case modeSearch:
 		return "↑↓ move · ⏎ run · ^r continue · → open · ^f fav · ^p pull" + m.acctHint(" · ^o account") + " · esc back"
+	case modeSessions:
+		return "↑↓ move · ⏎ resume · → open folder · esc back · q quit"
 	case modeAccount:
 		return "↑↓ move · ⏎ run once · s set for folder · c clear (inherit) · esc back"
 	case modeNew:

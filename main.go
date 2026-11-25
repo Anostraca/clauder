@@ -33,6 +33,7 @@ Flags (long only; the first unknown argument and everything after it go to claud
   --print-path      print the chosen path to stdout instead of running claude
   --favs            start in the favorites view
   --settings        start in the settings view (manage roots and accounts)
+  --sessions        start in the recent sessions view (resume one)
   --account NAME    run claude with this account instead of the folder's default
   --pull [PATH]     git pull --ff-only every repo under PATH (default: current dir)
   --clone-missing   with --pull: clone repos listed in .meta files that are missing
@@ -46,7 +47,8 @@ Flags (long only; the first unknown argument and everything after it go to claud
 Examples:
   clauder                      pick a folder, run claude
   clauder --resume             pick a folder, run claude --resume
-                               (in the picker, c runs claude --continue)
+                               (in the picker, c runs claude --continue,
+                               r lists recent sessions to resume)
   clauder --find infra -- -p "fix the bug"
   cd "$(clauder --print-path)"
 `
@@ -55,7 +57,7 @@ type options struct {
 	find               string
 	hasFind            bool
 	printPath, favs    bool
-	settings           bool
+	settings, sessions bool
 	editConfig         bool
 	help, version      bool
 	config             string
@@ -64,7 +66,8 @@ type options struct {
 	pullPath           string
 	jobs               int
 	pass               []string
-	cont               bool // picked with "continue" in the TUI; not a flag
+	cont               bool   // picked with "continue" in the TUI; not a flag
+	resume             string // session picked in the TUI; not a flag
 }
 
 // parseArgs recognises clauder's own long flags. At "--" or the first
@@ -121,6 +124,8 @@ func parseArgs(args []string) (options, error) {
 				o.favs = true
 			case "--settings":
 				o.settings = true
+			case "--sessions":
+				o.sessions = true
 			case "--clone-missing":
 				o.cloneMissing = true
 			case "--edit-config":
@@ -216,17 +221,19 @@ func run(args []string) int {
 		start.mode = modeFavs
 	case o.settings:
 		start.mode = modeSettings
+	case o.sessions:
+		start.mode = modeSessions
 	case created:
 		start = startOpts{mode: modeSettings, msg: "add your project folders with a"}
 	}
 
 	start.account = o.account
-	chosen, acct, cont, code := runTUI(cfg, start)
+	chosen, acct, resume, cont, code := runTUI(cfg, start)
 	if code != 0 {
 		return code
 	}
-	o.cont = cont
-	if acct != "" { // picked in the account selector
+	o.cont, o.resume = cont, resume
+	if acct != "" { // picked in the account selector, or the resumed session's
 		o.account = acct
 	}
 	return act(cfg, o, chosen)
@@ -234,7 +241,7 @@ func run(args []string) int {
 
 // runTUI renders on /dev/tty (falling back to stdin/stderr) so stdout stays
 // free for --print-path.
-func runTUI(cfg *Config, start startOpts) (chosen, account string, cont bool, code int) {
+func runTUI(cfg *Config, start startOpts) (chosen, account, resume string, cont bool, code int) {
 	var in io.Reader = os.Stdin
 	var out io.Writer = os.Stderr
 	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
@@ -244,11 +251,11 @@ func runTUI(cfg *Config, start startOpts) (chosen, account string, cont bool, co
 	m := newModel(cfg, lipgloss.NewRenderer(out), start)
 	final, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out)).Run()
 	if errors.Is(err, tea.ErrInterrupted) || errors.Is(err, tea.ErrProgramKilled) {
-		return "", "", false, 130
+		return "", "", "", false, 130
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "clauder:", sanitize(err.Error(), false))
-		return "", "", false, 1
+		return "", "", "", false, 1
 	}
 	fm := final.(*model)
 	fm.stopJobs()
@@ -256,15 +263,22 @@ func runTUI(cfg *Config, start startOpts) (chosen, account string, cont bool, co
 	if fm.code == 1 {
 		fmt.Fprintln(os.Stderr, dim("cancelled"))
 	}
-	return fm.chosen, fm.chosenAcct, fm.cont, fm.code
+	return fm.chosen, fm.chosenAcct, fm.resume, fm.cont, fm.code
 }
 
 // commandArgs is the argv for the command: the pass-through args, led by
-// --continue when the TUI asked for it and the user did not pass it already.
+// --continue or --resume ID when the TUI asked for it and the user did not
+// pass a continue or resume flag already.
 func commandArgs(command string, o options) []string {
 	args := []string{command}
 	if o.cont && !slices.Contains(o.pass, "--continue") && !slices.Contains(o.pass, "-c") {
 		args = append(args, "--continue")
+	}
+	resumed := slices.ContainsFunc(o.pass, func(a string) bool {
+		return a == "--resume" || a == "-r" || a == "--continue" || a == "-c" || strings.HasPrefix(a, "--resume=")
+	})
+	if o.resume != "" && !resumed {
+		args = append(args, "--resume", o.resume)
 	}
 	return append(args, o.pass...)
 }

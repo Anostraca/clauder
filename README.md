@@ -108,9 +108,10 @@ means the folder has subfolders, and a `★` after a name marks a favorite.
 | `←` / `-` / `⌫` | go up |
 | `.` | run claude in the current folder |
 | `/` | fuzzy search (all roots on the top screen, otherwise the current subtree) |
+| `r` | recent Claude sessions (all roots on the top screen, otherwise the current subtree); see Sessions below |
 | `n` | new folder here: `⏎` creates it and runs claude, `tab` creates it and opens it (no `/`, no leading/trailing spaces, no leading `.` `@` `#`) |
 | `f` | toggle the highlighted folder as a favorite |
-| `F` / `tab` | favorites list: `⏎` runs, `c` continues, `→` opens in browse, `f` removes, `←`/`esc` go back |
+| `F` / `tab` | favorites list: `⏎` runs, `c` continues, `→` opens in browse, `r` lists the sessions of all favorites, `f` removes, `←`/`esc` go back |
 | `+` | add the highlighted folder as a root |
 | `p` | git sync the highlighted folder (see below) |
 | `u` | account selector for the highlighted folder (when accounts are configured) |
@@ -120,6 +121,16 @@ means the folder has subfolders, and a `★` after a name marks a favorite.
 **Search.** Type to filter. Results rank favorites first, then fuzzy score, then shorter path.
 `⏎` runs the highlighted match, `ctrl-r` runs it with `--continue`, `→` opens it in browse mode, `ctrl-f` toggles favorite,
 `ctrl-p` syncs it, `ctrl-o` opens the account selector for it, `esc` goes back.
+
+**Sessions.** `r` (or `clauder --sessions`) lists the Claude Code conversations started in the folder and
+all its subfolders, newest first. clauder reads them from each account's config dir (`<dir>/projects/`;
+without accounts `$CLAUDE_CONFIG_DIR` or `~/.claude`), reading only the start and end of each file. A row shows
+the age, the folder, the session's title (your rename, else Claude's title, else the last or first prompt) and,
+with accounts, the account it belongs to. `⏎` runs `claude --resume <id>` in the session's folder with that
+account (it overrides `--account`, since the session only exists in that account's dir), `→` opens the folder in
+browse, `esc`/`←` go back, `q` cancels. Sessions of a folder that was moved are listed under its current
+location when Claude's project dir matches it; a folder that no longer exists shows as "(missing)". Only the newest
+300 session files are read; the status line says so when there are more.
 
 **Accounts.** With accounts configured, a dim line under the list shows which account `⏎` would use for the
 highlighted folder, and folders with an account of their own carry a dim `[name]` tag. `u` (or `ctrl-o` in
@@ -172,6 +183,7 @@ everything from there on is passed to claude unchanged (`clauder --resume`, `cla
 | `--print-path` | print the chosen folder to stdout instead of running claude: `cd "$(clauder --print-path)"` |
 | `--favs` | start in the favorites view |
 | `--settings` | start in settings |
+| `--sessions` | start in the sessions view for all roots |
 | `--account NAME` | use this account for this run instead of the folder's (with `--find` and TUI picks; `--print-path` ignores it); an unknown name exits 2 |
 | `--pull [PATH]` | sync repos under PATH (default: current dir); exit 1 if any failed |
 | `--clone-missing` | with `--pull`: clone missing `.meta` repos |

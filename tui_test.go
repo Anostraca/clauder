@@ -480,3 +480,107 @@ func TestTUIContinue(t *testing.T) {
 		t.Fatalf("missing: cmd=%v cont=%v chosen=%q", cmd != nil, m.cont, m.chosen)
 	}
 }
+
+func TestTUISessionsResume(t *testing.T) {
+	cfg, root := fixture(t)
+	home := filepath.Dir(root)
+	cfg.Accounts = []Account{{Name: "personal", ConfigDir: filepath.Join(home, ".claude")},
+		{Name: "work", ConfigDir: filepath.Join(home, ".claude-work")}}
+	cfg.Save()
+	alpha, beta := filepath.Join(root, "alpha"), filepath.Join(root, "beta")
+	now := time.Now()
+	writeSession(t, filepath.Join(home, ".claude-work"), alpha, "id-alpha", now.Add(-5*time.Minute),
+		userRec(t, alpha, "older"), rec(t, map[string]any{"type": "custom-title", "customTitle": "fix the login"}))
+	writeSession(t, filepath.Join(home, ".claude"), beta, "id-beta", now, userRec(t, beta, "newest"))
+	writeSession(t, filepath.Join(home, ".claude"), home, "id-outside", now, userRec(t, home, "outside"))
+	tm := start(t, cfg, startOpts{account: "personal"})
+	tm.Send(key(tea.KeyRight)) // into work
+	waitFor(t, tm, "r sessions")
+	tm.Type("r")
+	waitFor(t, tm, "fix the login")
+	tm.Type("j") // alpha: the older one
+	tm.Send(key(tea.KeyEnter))
+	m := finalModel(t, tm)
+	if len(m.sess.list) != 2 || m.sess.label != "work" {
+		t.Errorf("sessions = %+v in %q", m.sess.list, m.sess.label)
+	}
+	if m.code != 0 || m.chosen != alpha || m.resume != "id-alpha" || m.chosenAcct != "work" || m.cont {
+		t.Fatalf("code=%d chosen=%q resume=%q acct=%q cont=%v", m.code, m.chosen, m.resume, m.chosenAcct, m.cont)
+	}
+}
+
+func TestTUISessionsBackAndMissing(t *testing.T) {
+	cfg, root := fixture(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	home := filepath.Dir(root)
+	gone, deep := filepath.Join(root, "gone"), filepath.Join(root, "gamma/deep")
+	cfg.Favorites = []string{filepath.Join(root, "gamma")}
+	cfg.Save()
+	now := time.Now()
+	claude := filepath.Join(home, ".claude")
+	writeSession(t, claude, gone, "id-gone", now, userRec(t, gone, "lost"))
+	writeSession(t, claude, deep, "id-deep", now.Add(-time.Hour), userRec(t, deep, "deep dive"))
+
+	tm := start(t, cfg, startOpts{mode: modeSessions}) // --sessions: all roots
+	waitFor(t, tm, "(missing)")
+	tm.Send(key(tea.KeyEnter)) // missing folder: refused
+	waitFor(t, tm, "not found: ~/proj/gone")
+	tm.Type("j")
+	tm.Send(key(tea.KeyRight)) // open the session's folder in browse
+	waitFor(t, tm, "work/gamma/deep")
+	tm.Type("q")
+	if m := finalModel(t, tm); m.code != 1 || m.mode != modeBrowse || m.cur != deep || m.resume != "" || m.sess.label != "all roots" {
+		t.Fatalf("code=%d mode=%d cur=%q resume=%q label=%q", m.code, m.mode, m.cur, m.resume, m.sess.label)
+	}
+
+	tm = start(t, cfg, startOpts{mode: modeFavs}) // favorites scope, esc returns
+	tm.Type("r")
+	waitFor(t, tm, "deep dive")
+	tm.Send(key(tea.KeyEsc))
+	waitFor(t, tm, "f remove")
+	tm.Type("q")
+	if m := finalModel(t, tm); m.mode != modeFavs || len(m.items) != 1 || len(m.sess.list) != 1 || m.sess.label != "favorites" {
+		t.Fatalf("mode=%d items=%d sessions=%d", m.mode, len(m.items), len(m.sess.list))
+	}
+}
+
+func TestSessionsViewFits(t *testing.T) {
+	cfg, root := fixture(t)
+	cfg.Accounts = []Account{{Name: "work"}}
+	for _, w := range []int{40, 100} {
+		m := newModel(cfg, nil, startOpts{})
+		m.Update(tea.WindowSizeMsg{Width: w, Height: 14})
+		m.mode = modeSessions
+		m.sess.label = "work"
+		for i := range 50 {
+			m.sess.list = append(m.sess.list, Session{ID: strconv.Itoa(i), Dir: filepath.Join(root, "alpha/one"),
+				Title: strings.Repeat("a long title ", 20), Account: "work", When: time.Now().Add(-time.Duration(i) * time.Hour)})
+		}
+		m.sess.sel = 25
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) > 14 {
+			t.Errorf("width %d: view has %d lines:\n%s", w, len(lines), m.View())
+		}
+		for _, l := range lines {
+			if lipgloss.Width(l) > w {
+				t.Errorf("line wider than %d: %q", w, l)
+			}
+		}
+		if v := m.View(); !strings.Contains(v, "sessions in work") || !strings.Contains(v, "❯ 1d") || !strings.Contains(v, "[work]") || !strings.Contains(v, "50 sessions") {
+			t.Errorf("width %d:\n%s", w, v)
+		}
+		if w == 100 && !strings.Contains(m.View(), "work/alpha/one  a long title") {
+			t.Errorf("row:\n%s", m.View())
+		}
+	}
+}
+
+func TestAgo(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	for d, want := range map[time.Duration]string{-time.Hour: "now", 30 * time.Second: "now", 5 * time.Minute: "5m",
+		3 * time.Hour: "3h", 49 * time.Hour: "2d", 40 * 24 * time.Hour: "Oct 16", 400 * 24 * time.Hour: "2025"} {
+		if got := ago(now.Add(-d), now); got != want {
+			t.Errorf("ago(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
