@@ -4,6 +4,8 @@ Pick a project folder in a small terminal menu and run [Claude Code](https://doc
 (`claude`) there. You can also fuzzy-find folders, keep favorites, create folders, and `git pull` whole
 groups of repos.
 
+<img src="docs/screenshots/browse.png" width="700" alt="clauder top screen: favorites entry and three roots, with the key hints below">
+
 Runs on macOS and Linux (amd64 and arm64). Claude Code must be installed, with `claude` on your `PATH`.
 
 Not affiliated with Anthropic.
@@ -98,6 +100,8 @@ plus a config dir:
 first and opens the favorites list. Inside a root you see its subfolders, read live from disk. A dim `›`
 means the folder has subfolders, and a `★` after a name marks a favorite.
 
+<img src="docs/screenshots/folder.png" width="700" alt="Browsing a root: subfolders, a favorite marked with a star, the account line">
+
 | Key | Action |
 |---|---|
 | `↑↓` / `j k` | move (wraps around) |
@@ -118,9 +122,13 @@ means the folder has subfolders, and a `★` after a name marks a favorite.
 | `s` | settings (top screen) |
 | `q` / `esc` | cancel (exit code 1); `ctrl-c` exits with 130 |
 
+<img src="docs/screenshots/favorites.png" width="700" alt="Favorites list">
+
 **Search.** Type to filter. Results rank favorites first, then fuzzy score, then shorter path.
 `⏎` runs the highlighted match, `ctrl-r` runs it with `--continue`, `→` opens it in browse mode, `ctrl-f` toggles favorite,
 `ctrl-p` syncs it, `ctrl-o` opens the account selector for it, `esc` goes back.
+
+<img src="docs/screenshots/search.png" width="700" alt="Fuzzy search across all roots with the matched letters underlined">
 
 **Sessions.** `r` (or `clauder --sessions`) lists the Claude Code conversations started in the folder and
 all its subfolders, newest first. clauder reads them from each account's config dir (`<dir>/projects/`;
@@ -132,11 +140,15 @@ browse, `esc`/`←` go back, `q` cancels. Sessions of a folder that was moved ar
 location when Claude's project dir matches it; a folder that no longer exists shows as "(missing)". Only the newest
 300 session files are read; the status line says so when there are more.
 
+<img src="docs/screenshots/sessions.png" width="700" alt="Recent sessions of all roots: age, folder, title and account">
+
 **Accounts.** With accounts configured, a dim line under the list shows which account `⏎` would use for the
 highlighted folder, and folders with an account of their own carry a dim `[name]` tag. `u` (or `ctrl-o` in
 search) opens the selector: it lists each account with email, plan and markers for the global default and
 the folder's assignment. `⏎` runs claude there once with the selected account, `s` makes it the folder's
 account (inherited by subfolders), `c` clears the folder's own account so it inherits again, `esc` goes back.
+
+<img src="docs/screenshots/account.png" width="700" alt="Account selector for a folder">
 
 **Settings.** `tab` switches between the roots and accounts panes. Roots: `a` add (path with `tab`
 completion, then name), `r` rename, `d`/`x` delete (asks y/n), `c` cycle colour, `J`/`K` or `shift-↑↓`
@@ -145,11 +157,15 @@ first account, `~/.claude-<name>` after that), `r` rename, `d`/`x` delete (asks 
 `⏎` make it the global default (the first account added starts as default). `esc`/`q` back. Every change
 is saved immediately.
 
+<img src="docs/screenshots/settings.png" width="700" alt="Settings: the roots pane">
+
 ## Git sync
 
 `p` in the menu, or `clauder --pull [PATH]`, runs `git pull --ff-only` on every repo of a
 folder in parallel. Pulls are fast-forward only, so they never create merge commits. A dirty
 working tree is flagged, not skipped.
+
+<img src="docs/screenshots/sync.png" width="700" alt="Git sync results: updated, up to date, failed, dirty and missing repos">
 
 Repos are found by walking the folder (up to 4 levels). Each directory is handled on its own:
 1. A [meta](https://github.com/mateodelnorte/meta) `.meta` file (`{"projects": {"dir": "clone-url"}}`)
